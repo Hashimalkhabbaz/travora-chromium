@@ -1,0 +1,142 @@
+:root {
+  --bg: #0f1115;
+  --panel: #171a21;
+  --panel-2: #1e222b;
+  --border: #2a2f3a;
+  --text: #e6e8ee;
+  --muted: #8b93a7;
+  --accent: #4f8cff;
+  --accent-hover: #3d7af0;
+  --danger: #ff5c6c;
+  --ok: #3ecf8e;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.45 "Segoe UI", system-ui, sans-serif;
+}
+
+.hidden { display: none !important; }
+.muted { color: var(--muted); }
+.spacer { flex: 1; }
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.brand { font-weight: 600; font-size: 15px; }
+.browser-info { color: var(--muted); font-size: 12px; }
+.browser-info .warn { color: var(--danger); }
+
+.btn {
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font: inherit;
+}
+.btn:hover { border-color: #3a4150; }
+.btn:disabled { opacity: 0.5; cursor: default; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.primary:hover { background: var(--accent-hover); }
+.btn.ghost { background: transparent; }
+.btn.danger { color: var(--danger); }
+.btn.small { padding: 3px 9px; font-size: 12px; }
+
+input, select {
+  width: 100%;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 9px;
+  font: inherit;
+}
+input[type="color"] { width: 52px; height: 34px; padding: 2px; cursor: pointer; }
+input:focus, select:focus { outline: none; border-color: var(--accent); }
+
+.field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
+.field label { color: var(--muted); font-size: 12px; }
+.field.grow { flex: 1; }
+.field.end { justify-content: flex-end; }
+.row { display: flex; gap: 10px; align-items: flex-start; }
+
+.settings {
+  display: flex;
+  gap: 16px;
+  align-items: flex-end;
+  padding: 14px 20px 2px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+main { padding: 16px 20px; }
+
+.empty { text-align: center; margin-top: 120px; font-size: 15px; }
+
+table.profiles { width: 100%; border-collapse: collapse; }
+.profiles th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.profiles td {
+  padding: 10px 8px;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.profiles tr:hover td { background: var(--panel); }
+.profiles .name { font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.profiles .swatch { width: 12px; height: 12px; border-radius: 50%; flex: none; }
+.profiles .sub { color: var(--muted); font-size: 11px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.profiles .gpu { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.profiles .actions { white-space: nowrap; text-align: right; }
+.profiles .actions .btn { margin-left: 4px; }
+
+.proxy-host { color: var(--text); }
+.warn { color: #e3a008; }
+.link { background: none; border: none; padding: 0; color: var(--accent); cursor: pointer; font: inherit; }
+.link:disabled { color: var(--muted); cursor: default; }
+.status { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+.status::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #4a5162; }
+.status.running { color: var(--ok); }
+.status.running::before { background: var(--ok); }
+
+dialog {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  width: 460px;
+  padding: 20px;
+}
+dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+dialog h2 { margin: 0 0 16px; font-size: 16px; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+
+.toast {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  max-width: 420px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  padding: 10px 14px;
+  border-radius: 6px;
+}
+.toast.error { border-left-color: var(--danger); }

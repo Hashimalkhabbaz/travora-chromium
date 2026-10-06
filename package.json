@@ -1,0 +1,25 @@
+{
+  "name": "browser-manager",
+  "version": "1.0.0",
+  "description": "Electron manager for profiles of a fingerprint-patched Chromium",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "node scripts/start.js",
+    "smoke": "node scripts/smoke-test.js",
+    "test:noise": "node scripts/noise-test.js",
+    "audit:sites": "node scripts/site-audit.js",
+    "postinstall": "node node_modules/electron/install.js"
+  },
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "fingerprint-generator": "^2.1.88",
+    "proxy-chain": "^3.0.1"
+  },
+  "devDependencies": {
+    "electron": "^44.5.1",
+    "playwright-core": "^1.63.0"
+  },
+  "private": true
+}

@@ -1,0 +1,7 @@
+node_modules/
+out/
+dist/
+*.log
+
+# Local fingerprint-site results: contain the real IP and machine fingerprint
+audit-results/

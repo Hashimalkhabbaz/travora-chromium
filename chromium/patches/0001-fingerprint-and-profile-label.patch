@@ -1,0 +1,1168 @@
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+index 033f22b414..f7edddacec 100644
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -434,6 +434,7 @@
+ #include "services/network/public/mojom/url_loader_factory.mojom.h"
+ #include "services/network/public/mojom/web_transport.mojom.h"
+ #include "services/network/public/mojom/websocket.mojom.h"
++#include "third_party/blink/public/common/fingerprint/fingerprint_config.h"
+ #include "third_party/blink/public/common/chrome_debug_urls.h"
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/public/common/loader/url_loader_throttle.h"
+@@ -2908,6 +2909,7 @@ void ChromeContentBrowserClient::AppendExtraCommandLineSwitches(
+       *base::CommandLine::ForCurrentProcess();
+ 
+   static const char* const kCommonSwitchNames[] = {
++      blink::kFingerprintDataSwitch,  // Same fingerprint in every process.
+       embedder_support::kUserAgent,
+       switches::kUserDataDir,  // Make logs go to the right file.
+   };
+diff --git a/chrome/browser/shell_integration_win.cc b/chrome/browser/shell_integration_win.cc
+index 0332cca81e..bf931f4246 100644
+--- a/chrome/browser/shell_integration_win.cc
++++ b/chrome/browser/shell_integration_win.cc
+@@ -26,12 +26,14 @@
+ #include "base/files/file_enumerator.h"
+ #include "base/functional/bind.h"
+ #include "base/functional/callback.h"
++#include "base/hash/hash.h"
+ #include "base/logging.h"
+ #include "base/memory/weak_ptr.h"
+ #include "base/notreached.h"
+ #include "base/path_service.h"
+ #include "base/strings/strcat.h"
+ #include "base/strings/strcat_win.h"
++#include "base/strings/string_number_conversions.h"
+ #include "base/strings/string_util.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/task/single_thread_task_runner.h"
+@@ -97,6 +99,13 @@ std::wstring GetProfileIdFromPath(const base::FilePath& profile_path) {
+       profile_id += basenames[i];
+   }
+ 
++  // Every managed profile is its own user data dir with the same basenames
++  // ("browser-data.Default"), which would give all of them one app id: Windows
++  // would group their windows under a single taskbar button. Add a hash of the
++  // full path so each profile gets its own button (and its own badge).
++  profile_id += L"." + base::NumberToWString(
++                           base::PersistentHash(profile_path.AsUTF8Unsafe()));
++
+   return profile_id;
+ }
+ 
+diff --git a/chrome/browser/taskbar/taskbar_decorator_win.cc b/chrome/browser/taskbar/taskbar_decorator_win.cc
+index 90969f7bb0..ea8a2df3bc 100644
+--- a/chrome/browser/taskbar/taskbar_decorator_win.cc
++++ b/chrome/browser/taskbar/taskbar_decorator_win.cc
+@@ -193,12 +193,12 @@ void DrawTaskbarDecoration(gfx::NativeWindow window, const gfx::Image* image) {
+ }
+ 
+ void UpdateTaskbarDecoration(Profile* profile, gfx::NativeWindow window) {
++  // Upstream only badges when one browser has several profiles. Managed
++  // profiles each run as a separate browser with a single profile, so always
++  // badge: the colored profile avatar tells the taskbar buttons apart.
+   if (profile->IsGuestSession() ||
+       // Browser process and profile manager may be null in tests.
+-      (g_browser_process && g_browser_process->profile_manager() &&
+-       g_browser_process->profile_manager()
+-               ->GetProfileAttributesStorage()
+-               .GetNumberOfProfiles() <= 1)) {
++      !g_browser_process || !g_browser_process->profile_manager()) {
+     taskbar::DrawTaskbarDecoration(window, nullptr);
+     return;
+   }
+diff --git a/chrome/browser/ui/window_metadata/window_metadata_controller.cc b/chrome/browser/ui/window_metadata/window_metadata_controller.cc
+index 7b132613b3..7ce466ce51 100644
+--- a/chrome/browser/ui/window_metadata/window_metadata_controller.cc
++++ b/chrome/browser/ui/window_metadata/window_metadata_controller.cc
+@@ -6,8 +6,10 @@
+ 
+ #include <string>
+ 
++#include "base/strings/strcat.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "chrome/browser/picture_in_picture/picture_in_picture_window_manager.h"
++#include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/sessions/session_service.h"
+ #include "chrome/browser/sessions/session_service_factory.h"
+ #include "chrome/browser/sessions/session_service_lookup.h"
+@@ -18,10 +20,12 @@
+ #include "chrome/browser/ui/tabs/tab_strip_model.h"
+ #include "chrome/browser/ui/web_applications/app_browser_controller.h"
+ #include "chrome/grit/branded_strings.h"
++#include "chrome/common/pref_names.h"
+ #include "chrome/grit/generated_resources.h"
+ #include "components/captive_portal/core/buildflags.h"
+ #include "components/favicon/content/content_favicon_driver.h"
+ #include "components/favicon/core/favicon_driver.h"
++#include "components/prefs/pref_service.h"
+ #include "ui/base/l10n/l10n_util.h"
+ #include "ui/gfx/font_list.h"
+ #include "ui/gfx/text_elider.h"
+@@ -35,6 +39,27 @@ namespace {
+ 
+ using gfx::GetStringWidth;
+ 
++// Each managed profile runs as its own browser instance, so Chrome's usual
++// multi-profile cues (avatar names, taskbar badges) never appear. Prefix the
++// window title with the profile name instead, so windows can be told apart in
++// the taskbar and Alt+Tab. Only for profiles that were explicitly named.
++std::u16string WithProfileLabel(BrowserWindowInterface* browser,
++                                std::u16string title) {
++  Profile* profile = browser->GetProfile();
++  if (!profile || profile->IsOffTheRecord()) {
++    return title;
++  }
++  PrefService* prefs = profile->GetPrefs();
++  if (prefs->GetBoolean(prefs::kProfileUsingDefaultName)) {
++    return title;
++  }
++  const std::string& name = prefs->GetString(prefs::kProfileName);
++  if (name.empty()) {
++    return title;
++  }
++  return base::StrCat({u"[", base::UTF8ToUTF16(name), u"] ", title});
++}
++
+ }  // namespace
+ 
+ DEFINE_USER_DATA(WindowMetadataController);
+@@ -252,8 +277,9 @@ std::u16string WindowMetadataController::GetWindowTitleFromWebContents(
+   return ((browser_->GetType() == BrowserWindowInterface::Type::TYPE_NORMAL ||
+            browser_->GetType() == BrowserWindowInterface::Type::TYPE_POPUP) &&
+           include_app_name)
+-             ? l10n_util::GetStringFUTF16(IDS_BROWSER_WINDOW_TITLE_FORMAT,
+-                                          title)
++             ? WithProfileLabel(
++                   browser_, l10n_util::GetStringFUTF16(
++                                 IDS_BROWSER_WINDOW_TITLE_FORMAT, title))
+              : title;
+ #endif  // BUILDFLAG(IS_MAC)
+ }
+diff --git a/components/embedder_support/user_agent_utils.cc b/components/embedder_support/user_agent_utils.cc
+index 5d96c60405..1246bb59ce 100644
+--- a/components/embedder_support/user_agent_utils.cc
++++ b/components/embedder_support/user_agent_utils.cc
+@@ -33,6 +33,7 @@
+ #include "components/version_info/version_info.h"
+ #include "net/http/http_util.h"
+ #include "third_party/blink/public/common/features.h"
++#include "third_party/blink/public/common/fingerprint/fingerprint_config.h"
+ #include "third_party/blink/public/common/user_agent/user_agent_metadata.h"
+ 
+ #if BUILDFLAG(IS_WIN)
+@@ -162,10 +163,10 @@ const blink::UserAgentBrandList GetUserAgentBrandList(
+   int major_version_number;
+   bool parse_result = base::StringToInt(major_version, &major_version_number);
+   DCHECK(parse_result);
+-  std::optional<std::string> brand;
+-#if !BUILDFLAG(CHROMIUM_BRANDING)
+-  brand = version_info::GetProductName();
+-#endif
++  // Fingerprint build: always present as Google Chrome. A Chromium-branded
++  // build would otherwise report only the "Chromium" brand, which no real
++  // Chrome user sends.
++  std::optional<std::string> brand = "Google Chrome";
+ 
+   std::string brand_version =
+       output_version_type == blink::UserAgentBrandVersionType::kFullVersion
+@@ -479,6 +480,12 @@ std::optional<std::string> GetUserAgentFromCommandLine() {
+ }
+ 
+ std::string GetUserAgent() {
++  if (const blink::FingerprintConfig* fingerprint =
++          blink::FingerprintConfig::Get();
++      fingerprint && !fingerprint->user_agent.empty()) {
++    return fingerprint->user_agent;
++  }
++
+   std::optional<std::string> custom_ua = GetUserAgentFromCommandLine();
+   if (custom_ua.has_value()) {
+     return custom_ua.value();
+@@ -670,6 +677,11 @@ blink::UserAgentMetadata GetUserAgentMetadata(bool only_low_entropy_ch) {
+   metadata.mobile = GetMobileBitForUAMetadata();
+   metadata.platform = GetPlatformForUAMetadata();
+ 
++  const blink::FingerprintConfig* fingerprint = blink::FingerprintConfig::Get();
++  if (fingerprint && !fingerprint->ch_platform.empty()) {
++    metadata.platform = fingerprint->ch_platform;
++  }
++
+   // For users providing a valid user-agent override via the command line:
+   // If kUACHOverrideBlank is enabled, set user-agent metadata with the
+   // default blank values, otherwise return the default UserAgentMetadata values
+@@ -697,6 +709,20 @@ blink::UserAgentMetadata GetUserAgentMetadata(bool only_low_entropy_ch) {
+   metadata.bitness = GetCpuBitness();
+   metadata.wow64 = IsWoW64();
+   metadata.platform_version = GetPlatformVersion();
++
++  if (fingerprint) {
++    if (!fingerprint->ch_platform_version.empty()) {
++      metadata.platform_version = fingerprint->ch_platform_version;
++    }
++    if (!fingerprint->ch_architecture.empty()) {
++      metadata.architecture = fingerprint->ch_architecture;
++    }
++    if (!fingerprint->ch_bitness.empty()) {
++      metadata.bitness = fingerprint->ch_bitness;
++    }
++    metadata.model = fingerprint->ch_model;
++    metadata.wow64 = false;
++  }
+   return metadata;
+ }
+ 
+diff --git a/third_party/blink/common/BUILD.gn b/third_party/blink/common/BUILD.gn
+index 37ca8d47e3..b2054e283c 100644
+--- a/third_party/blink/common/BUILD.gn
++++ b/third_party/blink/common/BUILD.gn
+@@ -149,6 +149,7 @@ source_set("common") {
+     "crash_helpers.h",
+     "custom_handlers/protocol_handler_utils.cc",
+     "device_memory/approximated_device_memory.cc",
++    "fingerprint/fingerprint_config.cc",
+     "dom_storage/session_storage_namespace_id.cc",
+     "features.cc",
+     "fenced_frame/fenced_frame_utils.cc",
+diff --git a/third_party/blink/common/device_memory/approximated_device_memory.cc b/third_party/blink/common/device_memory/approximated_device_memory.cc
+index 7fd53ebba0..2e3adb2695 100644
+--- a/third_party/blink/common/device_memory/approximated_device_memory.cc
++++ b/third_party/blink/common/device_memory/approximated_device_memory.cc
+@@ -9,6 +9,7 @@
+ #include "base/feature_list.h"
+ #include "base/system/sys_info.h"
+ #include "third_party/blink/public/common/features.h"
++#include "third_party/blink/public/common/fingerprint/fingerprint_config.h"
+ 
+ namespace blink {
+ 
+@@ -27,6 +28,10 @@ void ApproximatedDeviceMemory::Initialize() {
+ 
+ // static
+ float ApproximatedDeviceMemory::GetApproximatedDeviceMemory() {
++  if (const FingerprintConfig* fingerprint = FingerprintConfig::Get();
++      fingerprint && fingerprint->device_memory > 0) {
++    return fingerprint->device_memory;
++  }
+   return approximated_device_memory_gb_;
+ }
+ 
+diff --git a/third_party/blink/common/fingerprint/fingerprint_config.cc b/third_party/blink/common/fingerprint/fingerprint_config.cc
+new file mode 100644
+index 0000000000..eb0c4ebafb
+--- /dev/null
++++ b/third_party/blink/common/fingerprint/fingerprint_config.cc
+@@ -0,0 +1,110 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "third_party/blink/public/common/fingerprint/fingerprint_config.h"
++
++#include <optional>
++#include <string>
++
++#include "base/base64.h"
++#include "base/command_line.h"
++#include "base/json/json_reader.h"
++#include "base/logging.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/values.h"
++
++namespace blink {
++
++namespace {
++
++void ReadString(const base::DictValue& dict,
++                std::string_view key,
++                std::string& out) {
++  if (const std::string* value = dict.FindString(key)) {
++    out = *value;
++  }
++}
++
++void ReadInt(const base::DictValue& dict, std::string_view key, int& out) {
++  if (std::optional<double> value = dict.FindDouble(key)) {
++    out = static_cast<int>(*value);
++  }
++}
++
++const FingerprintConfig* Parse() {
++  const base::CommandLine* command_line =
++      base::CommandLine::ForCurrentProcess();
++  if (!command_line->HasSwitch(kFingerprintDataSwitch)) {
++    return nullptr;
++  }
++
++  std::string json;
++  if (!base::Base64Decode(
++          command_line->GetSwitchValueASCII(kFingerprintDataSwitch), &json)) {
++    LOG(ERROR) << "--" << kFingerprintDataSwitch << " is not valid base64";
++    return nullptr;
++  }
++  std::optional<base::DictValue> root =
++      base::JSONReader::ReadDict(json, base::JSON_PARSE_RFC);
++  if (!root) {
++    LOG(ERROR) << "--" << kFingerprintDataSwitch << " is not a JSON object";
++    return nullptr;
++  }
++
++  auto* config = new FingerprintConfig();  // Lives for the whole process.
++  ReadString(*root, "ua", config->user_agent);
++  ReadString(*root, "platform", config->navigator_platform);
++  ReadString(*root, "timezone", config->timezone);
++  ReadInt(*root, "hardwareConcurrency", config->hardware_concurrency);
++  if (std::optional<double> memory = root->FindDouble("deviceMemory")) {
++    config->device_memory = static_cast<float>(*memory);
++  }
++
++  if (const base::DictValue* ch = root->FindDict("ch")) {
++    ReadString(*ch, "platform", config->ch_platform);
++    ReadString(*ch, "platformVersion", config->ch_platform_version);
++    ReadString(*ch, "architecture", config->ch_architecture);
++    ReadString(*ch, "bitness", config->ch_bitness);
++    ReadString(*ch, "model", config->ch_model);
++  }
++  if (const base::DictValue* screen = root->FindDict("screen")) {
++    ReadInt(*screen, "width", config->screen_width);
++    ReadInt(*screen, "height", config->screen_height);
++    ReadInt(*screen, "availWidth", config->screen_avail_width);
++    ReadInt(*screen, "availHeight", config->screen_avail_height);
++    ReadInt(*screen, "colorDepth", config->screen_color_depth);
++  }
++  if (const base::DictValue* geo = root->FindDict("geo")) {
++    std::optional<double> lat = geo->FindDouble("lat");
++    std::optional<double> lon = geo->FindDouble("lon");
++    if (lat && lon && *lat >= -90 && *lat <= 90 && *lon >= -180 &&
++        *lon <= 180) {
++      config->has_geolocation = true;
++      config->latitude = *lat;
++      config->longitude = *lon;
++      config->accuracy = geo->FindDouble("accuracy").value_or(100);
++    }
++  }
++  if (const std::string* seed = root->FindString("noiseSeed")) {
++    if (!base::HexStringToUInt64(*seed, &config->noise_seed)) {
++      LOG(ERROR) << "Invalid noiseSeed in --" << kFingerprintDataSwitch;
++      config->noise_seed = 0;
++    }
++  }
++  if (const base::DictValue* webgl = root->FindDict("webgl")) {
++    ReadString(*webgl, "vendor", config->webgl_vendor);
++    ReadString(*webgl, "renderer", config->webgl_renderer);
++  }
++  return config;
++}
++
++}  // namespace
++
++// static
++const FingerprintConfig* FingerprintConfig::Get() {
++  static const FingerprintConfig* const config = Parse();
++  return config;
++}
++
++}  // namespace blink
+diff --git a/third_party/blink/public/common/BUILD.gn b/third_party/blink/public/common/BUILD.gn
+index d2881c7a29..3bb6e7269c 100644
+--- a/third_party/blink/public/common/BUILD.gn
++++ b/third_party/blink/public/common/BUILD.gn
+@@ -140,6 +140,7 @@ source_set("headers") {
+     "css/scripting.h",
+     "custom_handlers/protocol_handler_utils.h",
+     "device_memory/approximated_device_memory.h",
++    "fingerprint/fingerprint_config.h",
+     "dom/dom_node_id.h",
+     "dom_storage/session_storage_namespace_id.h",
+     "features.h",
+diff --git a/third_party/blink/public/common/fingerprint/fingerprint_config.h b/third_party/blink/public/common/fingerprint/fingerprint_config.h
+new file mode 100644
+index 0000000000..b92f28cde4
+--- /dev/null
++++ b/third_party/blink/public/common/fingerprint/fingerprint_config.h
+@@ -0,0 +1,78 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef THIRD_PARTY_BLINK_PUBLIC_COMMON_FINGERPRINT_FINGERPRINT_CONFIG_H_
++#define THIRD_PARTY_BLINK_PUBLIC_COMMON_FINGERPRINT_FINGERPRINT_CONFIG_H_
++
++#include <cstdint>
++#include <string>
++
++#include "third_party/blink/public/common/common_export.h"
++
++namespace blink {
++
++// Command-line switch carrying the fingerprint for this browser instance:
++// base64-encoded JSON (schema below). It is set on the browser process by the
++// profile manager and copied to every child process, so the browser (HTTP
++// headers, UA client hints) and renderers (navigator, screen, WebGL) agree.
++//
++// {
++//   "ua": "Mozilla/5.0 (...)",            navigator.userAgent + User-Agent header
++//   "platform": "Win32",                   navigator.platform
++//   "ch": { "platform": "Windows", "platformVersion": "19.0.0",
++//           "architecture": "x86", "bitness": "64", "model": "" },
++//   "hardwareConcurrency": 8,
++//   "deviceMemory": 8,
++//   "screen": { "width": 1920, "height": 1080, "availWidth": 1920,
++//               "availHeight": 1040, "colorDepth": 24 },
++//   "webgl": { "vendor": "Google Inc. (NVIDIA)", "renderer": "ANGLE (...)" },
++//   "timezone": "Europe/Rome",             IANA id, e.g. from the proxy's location
++//   "geo": { "lat": 45.47, "lon": 9.19, "accuracy": 80 },   navigator.geolocation
++//   "noiseSeed": "9f3c2a1b4d5e6f70"        hex uint64: canvas/WebGL/audio noise
++//                                          and per-profile font subset
++// }
++//
++// Every field is optional; absent fields keep the real value.
++inline constexpr char kFingerprintDataSwitch[] = "fingerprint-data";
++
++struct BLINK_COMMON_EXPORT FingerprintConfig {
++  // Returns the config of the current process, or nullptr when the switch is
++  // absent or invalid. Parsed once; thread-safe.
++  static const FingerprintConfig* Get();
++
++  std::string user_agent;
++  std::string navigator_platform;
++
++  std::string ch_platform;
++  std::string ch_platform_version;
++  std::string ch_architecture;
++  std::string ch_bitness;
++  std::string ch_model;
++
++  int hardware_concurrency = 0;
++  float device_memory = 0;
++
++  int screen_width = 0;
++  int screen_height = 0;
++  int screen_avail_width = 0;
++  int screen_avail_height = 0;
++  int screen_color_depth = 0;
++
++  std::string webgl_vendor;
++  std::string webgl_renderer;
++
++  std::string timezone;
++
++  bool has_geolocation = false;
++  double latitude = 0;
++  double longitude = 0;
++  double accuracy = 0;
++
++  // 0 = noise disabled.
++  uint64_t noise_seed = 0;
++};
++
++}  // namespace blink
++
++#endif  // THIRD_PARTY_BLINK_PUBLIC_COMMON_FINGERPRINT_FINGERPRINT_CONFIG_H_
+diff --git a/third_party/blink/renderer/core/canvas_interventions/build.gni b/third_party/blink/renderer/core/canvas_interventions/build.gni
+index 799b6b7135..d5f692ac40 100644
+--- a/third_party/blink/renderer/core/canvas_interventions/build.gni
++++ b/third_party/blink/renderer/core/canvas_interventions/build.gni
+@@ -3,6 +3,8 @@
+ # found in the LICENSE file.
+ 
+ blink_core_sources_canvas_interventions = [
++  "fingerprint_noise.cc",
++  "fingerprint_noise.h",
+   "noise_hash.cc",
+   "noise_hash.h",
+   "noise_helper.cc",
+diff --git a/third_party/blink/renderer/core/canvas_interventions/fingerprint_noise.cc b/third_party/blink/renderer/core/canvas_interventions/fingerprint_noise.cc
+new file mode 100644
+index 0000000000..657cdaf0bd
+--- /dev/null
++++ b/third_party/blink/renderer/core/canvas_interventions/fingerprint_noise.cc
+@@ -0,0 +1,138 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "third_party/blink/renderer/core/canvas_interventions/fingerprint_noise.h"
++
++#include <cstdint>
++
++#include "third_party/blink/public/common/fingerprint/fingerprint_config.h"
++#include "third_party/blink/public/common/fingerprinting_protection/noise_token.h"
++#include "third_party/blink/renderer/core/canvas_interventions/noise_hash.h"
++#include "third_party/blink/renderer/core/canvas_interventions/noise_helper.h"
++#include "third_party/blink/renderer/core/execution_context/execution_context.h"
++#include "third_party/blink/renderer/platform/graphics/static_bitmap_image.h"
++#include "third_party/blink/renderer/platform/graphics/unaccelerated_static_bitmap_image.h"
++#include "third_party/blink/renderer/platform/weborigin/security_origin.h"
++#include "third_party/skia/include/core/SkBitmap.h"
++#include "third_party/skia/include/core/SkImage.h"
++
++namespace blink {
++
++namespace {
++
++// Canvases larger than this are not noised: fingerprinting canvases are small,
++// and noising every readback of a huge canvas (e.g. an image editor) is slow.
++constexpr int64_t kMaxNoisedPixels = 4096 * 4096;
++
++uint64_t Fnv1a(uint64_t hash, base::span<const uint8_t> bytes) {
++  for (uint8_t byte : bytes) {
++    hash ^= byte;
++    hash *= 0x00000100000001b3ull;
++  }
++  return hash;
++}
++
++// 0 when noise is disabled; otherwise seed mixed with the site of `context`.
++uint64_t NoiseTokenFor(ExecutionContext* context) {
++  const FingerprintConfig* fingerprint = FingerprintConfig::Get();
++  if (!fingerprint || !fingerprint->noise_seed || !context) {
++    return 0;
++  }
++  String site;
++  if (const SecurityOrigin* origin = context->GetSecurityOrigin()) {
++    site = origin->RegistrableDomain();
++    if (site.empty()) {
++      site = origin->Host();
++    }
++  }
++  std::string site_utf8 = site.Utf8();
++  uint64_t token = Fnv1a(0xcbf29ce484222325ull ^ fingerprint->noise_seed,
++                         base::as_byte_span(site_utf8));
++  return token ? token : 1;
++}
++
++}  // namespace
++
++scoped_refptr<StaticBitmapImage> MaybeNoiseCanvasSnapshot(
++    ExecutionContext* context,
++    scoped_refptr<StaticBitmapImage> image) {
++  const uint64_t token = NoiseTokenFor(context);
++  if (!token || !image) {
++    return image;
++  }
++  const int64_t pixel_count =
++      static_cast<int64_t>(image->width()) * image->height();
++  if (pixel_count <= 0 || pixel_count > kMaxNoisedPixels) {
++    return image;
++  }
++
++  scoped_refptr<StaticBitmapImage> raster = image->MakeUnaccelerated();
++  if (!raster) {
++    return image;
++  }
++  sk_sp<SkImage> source = raster->PaintImageForCurrentFrame().GetSwSkImage();
++  if (!source) {
++    return image;
++  }
++
++  // Unpremultiplied RGBA so noise never produces invalid premultiplied values.
++  SkBitmap bitmap;
++  if (!bitmap.tryAllocPixels(SkImageInfo::Make(
++          source->width(), source->height(), kRGBA_8888_SkColorType,
++          kUnpremul_SkAlphaType, source->refColorSpace()))) {
++    return image;
++  }
++  if (!source->readPixels(bitmap.pixmap(), 0, 0)) {
++    return image;
++  }
++
++  // SAFETY: the bitmap was allocated above with exactly width*height*4 bytes
++  // (kRGBA_8888, minimal row bytes).
++  base::span<uint8_t> pixels = UNSAFE_BUFFERS(base::span(
++      static_cast<uint8_t*>(bitmap.getPixels()), bitmap.computeByteSize()));
++  NoisePixels(NoiseHash(NoiseToken(token)), pixels, bitmap.width(),
++              bitmap.height());
++  bitmap.setImmutable();
++
++  return UnacceleratedStaticBitmapImage::Create(bitmap.asImage(),
++                                                image->Orientation());
++}
++
++void MaybeNoiseRgbaPixels(ExecutionContext* context,
++                          base::span<uint8_t> pixels,
++                          int width,
++                          int height) {
++  const uint64_t token = NoiseTokenFor(context);
++  if (!token || width <= 0 || height <= 0 ||
++      static_cast<int64_t>(width) * height > kMaxNoisedPixels ||
++      pixels.size() != static_cast<size_t>(width) * height * 4) {
++    return;
++  }
++  NoisePixels(NoiseHash(NoiseToken(token)), pixels, width, height);
++}
++
++void MaybeNoiseAudioSamples(ExecutionContext* context,
++                            base::span<float> samples,
++                            unsigned channel) {
++  uint64_t state = NoiseTokenFor(context);
++  if (!state) {
++    return;
++  }
++  state ^= 0x9e3779b97f4a7c15ull * (channel + 1);
++  for (float& sample : samples) {
++    // xorshift64*: cheap deterministic sequence per (profile, site, channel).
++    state ^= state >> 12;
++    state ^= state << 25;
++    state ^= state >> 27;
++    const uint64_t random = state * 0x2545f4914f6cdd1dull;
++    // Uniform in [-1, 1) scaled to ~1e-6 relative: inaudible, but it changes
++    // the float values that audio fingerprints hash. Silence stays silent.
++    const double unit =
++        static_cast<double>(random >> 11) / static_cast<double>(1ull << 52) -
++        1.0;
++    sample = static_cast<float>(sample * (1.0 + unit * 1e-6));
++  }
++}
++
++}  // namespace blink
+diff --git a/third_party/blink/renderer/core/canvas_interventions/fingerprint_noise.h b/third_party/blink/renderer/core/canvas_interventions/fingerprint_noise.h
+new file mode 100644
+index 0000000000..f93ac6d3a5
+--- /dev/null
++++ b/third_party/blink/renderer/core/canvas_interventions/fingerprint_noise.h
+@@ -0,0 +1,44 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_CORE_CANVAS_INTERVENTIONS_FINGERPRINT_NOISE_H_
++#define THIRD_PARTY_BLINK_RENDERER_CORE_CANVAS_INTERVENTIONS_FINGERPRINT_NOISE_H_
++
++#include <cstdint>
++
++#include "base/containers/span.h"
++#include "base/memory/scoped_refptr.h"
++#include "third_party/blink/renderer/core/core_export.h"
++
++namespace blink {
++
++class ExecutionContext;
++class StaticBitmapImage;
++
++// Per-profile noise for readback-based fingerprinting (canvas, WebGL, audio),
++// enabled by "noiseSeed" in --fingerprint-data. The seed is mixed with the
++// site (registrable domain), so each site sees a different but stable result
++// for the same profile, and the same content always produces the same output
++// (reading twice cannot reveal the noise). All functions are no-ops when no
++// seed is configured.
++
++// Returns a noised raster copy of `image`, or `image` itself.
++CORE_EXPORT scoped_refptr<StaticBitmapImage> MaybeNoiseCanvasSnapshot(
++    ExecutionContext* context,
++    scoped_refptr<StaticBitmapImage> image);
++
++// Noises 4-byte-per-pixel data in place (e.g. WebGL readPixels RGBA output).
++CORE_EXPORT void MaybeNoiseRgbaPixels(ExecutionContext* context,
++                                      base::span<uint8_t> pixels,
++                                      int width,
++                                      int height);
++
++// Applies an inaudible (~1e-6 relative) deterministic change to rendered audio.
++CORE_EXPORT void MaybeNoiseAudioSamples(ExecutionContext* context,
++                                        base::span<float> samples,
++                                        unsigned channel);
++
++}  // namespace blink
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_CANVAS_INTERVENTIONS_FINGERPRINT_NOISE_H_
+diff --git a/third_party/blink/renderer/core/css/media_values.cc b/third_party/blink/renderer/core/css/media_values.cc
+index 0d60244742..5d93308c5e 100644
+--- a/third_party/blink/renderer/core/css/media_values.cc
++++ b/third_party/blink/renderer/core/css/media_values.cc
+@@ -5,6 +5,7 @@
+ #include "third_party/blink/renderer/core/css/media_values.h"
+ 
+ #include "third_party/blink/public/common/css/scripting.h"
++#include "third_party/blink/public/common/fingerprint/fingerprint_config.h"
+ #include "third_party/blink/renderer/core/css/css_resolution_units.h"
+ #include "third_party/blink/renderer/core/css/css_to_length_conversion_data.h"
+ #include "third_party/blink/renderer/core/css/media_feature_overrides.h"
+@@ -167,6 +168,10 @@ int MediaValues::CalculateDeviceWidth(LocalFrame* frame) {
+   const display::ScreenInfo& screen_info =
+       frame->GetPage()->GetChromeClient().GetScreenInfo(*frame);
+   int device_width = screen_info.rect.width();
++  if (const FingerprintConfig* fingerprint = FingerprintConfig::Get();
++      fingerprint && fingerprint->screen_width > 0) {
++    return fingerprint->screen_width;
++  }
+   if (frame->GetSettings()->GetReportScreenSizeInPhysicalPixelsQuirk()) {
+     device_width = static_cast<int>(
+         lroundf(device_width * screen_info.device_scale_factor));
+@@ -179,6 +184,10 @@ int MediaValues::CalculateDeviceHeight(LocalFrame* frame) {
+   const display::ScreenInfo& screen_info =
+       frame->GetPage()->GetChromeClient().GetScreenInfo(*frame);
+   int device_height = screen_info.rect.height();
++  if (const FingerprintConfig* fingerprint = FingerprintConfig::Get();
++      fingerprint && fingerprint->screen_height > 0) {
++    return fingerprint->screen_height;
++  }
+   if (frame->GetSettings()->GetReportScreenSizeInPhysicalPixelsQuirk()) {
+     device_height = static_cast<int>(
+         lroundf(device_height * screen_info.device_scale_factor));
+diff --git a/third_party/blink/renderer/core/execution_context/navigator_base.cc b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+index cccfafe8f9..18de3efc55 100644
+--- a/third_party/blink/renderer/core/execution_context/navigator_base.cc
++++ b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+@@ -7,6 +7,7 @@
+ #include "base/feature_list.h"
+ #include "build/build_config.h"
+ #include "third_party/blink/public/common/features.h"
++#include "third_party/blink/public/common/fingerprint/fingerprint_config.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+ #include "third_party/blink/renderer/core/frame/navigator_concurrent_hardware.h"
+ #include "third_party/blink/renderer/core/probe/core_probes.h"
+@@ -52,6 +53,12 @@ String NavigatorBase::userAgent() const {
+ }
+ 
+ String NavigatorBase::platform() const {
++  // Fingerprint: desktop Chrome reports a fixed per-OS value here (not
++  // NavigatorID::platform), so the override must be applied here too.
++  if (const FingerprintConfig* fingerprint = FingerprintConfig::Get();
++      fingerprint && !fingerprint->navigator_platform.empty()) {
++    return String::FromUtf8(fingerprint->navigator_platform);
++  }
+ #if BUILDFLAG(IS_ANDROID)
+   // We need to check the ReduceUserAgentMinorVersion feature flag for
+   // Android WebView, which does not currently ship a reduced User-Agent.
+diff --git a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
+index f5c0db2d1b..01a05c5c92 100644
+--- a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
++++ b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
+@@ -5,10 +5,15 @@
+ #include "third_party/blink/renderer/core/frame/navigator_concurrent_hardware.h"
+ 
+ #include "base/system/sys_info.h"
++#include "third_party/blink/public/common/fingerprint/fingerprint_config.h"
+ 
+ namespace blink {
+ 
+ unsigned NavigatorConcurrentHardware::hardwareConcurrency() const {
++  if (const FingerprintConfig* fingerprint = FingerprintConfig::Get();
++      fingerprint && fingerprint->hardware_concurrency > 0) {
++    return static_cast<unsigned>(fingerprint->hardware_concurrency);
++  }
+   return static_cast<unsigned>(base::SysInfo::NumberOfProcessors());
+ }
+ 
+diff --git a/third_party/blink/renderer/core/frame/navigator_id.cc b/third_party/blink/renderer/core/frame/navigator_id.cc
+index 22243ebf5e..a3a75f2ab9 100644
+--- a/third_party/blink/renderer/core/frame/navigator_id.cc
++++ b/third_party/blink/renderer/core/frame/navigator_id.cc
+@@ -30,6 +30,7 @@
+  */
+ 
+ #include "third_party/blink/renderer/core/frame/navigator_id.h"
++#include "third_party/blink/public/common/fingerprint/fingerprint_config.h"
+ 
+ #include "base/feature_list.h"
+ #include "build/build_config.h"
+@@ -59,6 +60,10 @@ String NavigatorID::appVersion() {
+ }
+ 
+ String NavigatorID::platform() const {
++  if (const FingerprintConfig* fingerprint = FingerprintConfig::Get();
++      fingerprint && !fingerprint->navigator_platform.empty()) {
++    return String::FromUtf8(fingerprint->navigator_platform);
++  }
+ #if BUILDFLAG(IS_MAC)
+   // Match Safari and Mozilla on Mac x86.
+   return "MacIntel";
+diff --git a/third_party/blink/renderer/core/frame/screen.cc b/third_party/blink/renderer/core/frame/screen.cc
+index ed5028943e..c6a87691ec 100644
+--- a/third_party/blink/renderer/core/frame/screen.cc
++++ b/third_party/blink/renderer/core/frame/screen.cc
+@@ -27,6 +27,7 @@
+  */
+ 
+ #include "third_party/blink/renderer/core/frame/screen.h"
++#include "third_party/blink/public/common/fingerprint/fingerprint_config.h"
+ 
+ #include "base/numerics/safe_conversions.h"
+ #include "services/network/public/mojom/permissions_policy/permissions_policy_feature.mojom-blink.h"
+@@ -109,6 +110,10 @@ unsigned Screen::colorDepth() const {
+   if (!DomWindow()) {
+     return unknown_color_depth;
+   }
++  if (const FingerprintConfig* fingerprint = FingerprintConfig::Get();
++      fingerprint && fingerprint->screen_color_depth > 0) {
++    return static_cast<unsigned>(fingerprint->screen_color_depth);
++  }
+   return GetScreenInfo().depth == 0
+              ? unknown_color_depth
+              : base::saturated_cast<unsigned>(GetScreenInfo().depth);
+@@ -172,6 +177,16 @@ bool Screen::isExtended() const {
+ gfx::Rect Screen::GetRect(bool available) const {
+   if (!DomWindow())
+     return gfx::Rect();
++  if (const FingerprintConfig* fingerprint = FingerprintConfig::Get();
++      fingerprint && fingerprint->screen_width > 0 &&
++      fingerprint->screen_height > 0) {
++    if (available && fingerprint->screen_avail_width > 0 &&
++        fingerprint->screen_avail_height > 0) {
++      return gfx::Rect(fingerprint->screen_avail_width,
++                       fingerprint->screen_avail_height);
++    }
++    return gfx::Rect(fingerprint->screen_width, fingerprint->screen_height);
++  }
+   LocalFrame* frame = DomWindow()->GetFrame();
+   const display::ScreenInfo& screen_info = GetScreenInfo();
+   gfx::Rect rect = available ? screen_info.available_rect : screen_info.rect;
+diff --git a/third_party/blink/renderer/core/geolocation/geolocation.cc b/third_party/blink/renderer/core/geolocation/geolocation.cc
+index 73e27320ca..c041a0fcab 100644
+--- a/third_party/blink/renderer/core/geolocation/geolocation.cc
++++ b/third_party/blink/renderer/core/geolocation/geolocation.cc
+@@ -35,6 +35,7 @@
+ #include "services/device/public/mojom/geoposition.mojom-blink.h"
+ #include "services/network/public/mojom/permissions_policy/permissions_policy_feature.mojom-blink.h"
+ #include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
++#include "third_party/blink/public/common/fingerprint/fingerprint_config.h"
+ #include "third_party/blink/public/platform/platform.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_accuracy_mode.h"
+ #include "third_party/blink/renderer/core/frame/deprecation/deprecation.h"
+@@ -726,6 +727,27 @@ void Geolocation::ResetGeolocationConnection() {
+ }
+ 
+ void Geolocation::QueryNextPosition() {
++  // Fingerprint: the configured position replaces the OS one (see
++  // OnPositionUpdated), so don't wait for the OS provider, which may never
++  // answer (e.g. Windows location services off). This only runs after the
++  // permission was granted. Like a real provider, report again only after a
++  // while for watchPosition().
++  if (const FingerprintConfig* fingerprint = FingerprintConfig::Get();
++      fingerprint && fingerprint->has_geolocation) {
++    GetExecutionContext()
++        ->GetTaskRunner(TaskType::kMiscPlatformAPI)
++        ->PostDelayedTask(
++            FROM_HERE,
++            blink::BindOnce(
++                &Geolocation::OnPositionUpdated, WrapPersistent(this),
++                device::mojom::blink::GeopositionResult::NewError(
++                    device::mojom::blink::GeopositionError::New(
++                        device::mojom::blink::GeopositionErrorCode::
++                            kPositionUnavailable,
++                        String(), String()))),
++            last_position_ ? base::Seconds(30) : base::Milliseconds(120));
++    return;
++  }
+   geolocation_->QueryNextPosition(
+       blink::BindOnce(&Geolocation::OnPositionUpdated, WrapPersistent(this)));
+ }
+@@ -737,6 +759,25 @@ void Geolocation::OnPositionUpdated(
+     return;
+   }
+ 
++  // Fingerprint: report the configured position (near the proxy's location)
++  // instead of the real one. Also when the OS has no position (e.g. Windows
++  // location services off), since a working location is the common case. A
++  // denied permission stays denied.
++  if (const FingerprintConfig* fingerprint = FingerprintConfig::Get();
++      fingerprint && fingerprint->has_geolocation &&
++      !(result->is_error() &&
++        result->get_error()->error_code ==
++            device::mojom::blink::GeopositionErrorCode::kPermissionDenied)) {
++    auto position = device::mojom::blink::Geoposition::New();
++    position->latitude = fingerprint->latitude;
++    position->longitude = fingerprint->longitude;
++    position->accuracy = fingerprint->accuracy;
++    position->timestamp = base::Time::Now();
++    position->is_precise = true;
++    result =
++        device::mojom::blink::GeopositionResult::NewPosition(std::move(position));
++  }
++
+   // If a location result arrives from the browser process while the page is
+   // hidden (e.g. due to an in-flight Mojo response racing with a tab switch),
+   // we drop the update immediately. This guarantees that no location data is
+diff --git a/third_party/blink/renderer/core/html/canvas/canvas_async_blob_creator.cc b/third_party/blink/renderer/core/html/canvas/canvas_async_blob_creator.cc
+index 943d6ed7b7..3a72836a45 100644
+--- a/third_party/blink/renderer/core/html/canvas/canvas_async_blob_creator.cc
++++ b/third_party/blink/renderer/core/html/canvas/canvas_async_blob_creator.cc
+@@ -9,6 +9,7 @@
+ #include "base/metrics/histogram_macros.h"
+ #include "build/build_config.h"
+ #include "third_party/blink/public/platform/platform.h"
++#include "third_party/blink/renderer/core/canvas_interventions/fingerprint_noise.h"
+ #include "third_party/blink/public/platform/task_type.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
+ #include "third_party/blink/renderer/core/dom/document.h"
+@@ -176,7 +177,7 @@ CanvasAsyncBlobCreator::CanvasAsyncBlobCreator(
+   // We use pixmap to access the image pixels. Make the image unaccelerated if
+   // necessary. May return nullptr if GPU context lost or readback buffer
+   // allocation failed.
+-  image_ = image->MakeUnaccelerated();
++  image_ = MaybeNoiseCanvasSnapshot(context, image)->MakeUnaccelerated();
+ 
+   if (image_) {
+     skia_image_ = image_->PaintImageForCurrentFrame().GetSwSkImage();
+diff --git a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
+index 6a5f09ae85..87f62d3319 100644
+--- a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
++++ b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
+@@ -48,6 +48,7 @@
+ #include "services/metrics/public/cpp/ukm_recorder.h"
+ #include "services/metrics/public/cpp/ukm_source_id.h"
+ #include "third_party/blink/public/common/features.h"
++#include "third_party/blink/renderer/core/canvas_interventions/fingerprint_noise.h"
+ #include "third_party/blink/public/common/thread_safe_browser_interface_broker_proxy.h"
+ #include "third_party/blink/public/mojom/gpu/gpu.mojom-blink.h"
+ #include "third_party/blink/public/platform/platform.h"
+@@ -1415,7 +1416,8 @@ String HTMLCanvasElement::ToDataURLInternal(
+   ImageEncodingMimeType encoding_mime_type =
+       ImageEncoderUtils::ToEncodingMimeType(mime_type);
+ 
+-  scoped_refptr<StaticBitmapImage> image_bitmap = Snapshot(source_buffer);
++  scoped_refptr<StaticBitmapImage> image_bitmap =
++      MaybeNoiseCanvasSnapshot(GetExecutionContext(), Snapshot(source_buffer));
+   if (image_bitmap) {
+     std::unique_ptr<ImageDataBuffer> data_buffer =
+         ImageDataBuffer::Create(image_bitmap);
+diff --git a/third_party/blink/renderer/core/timezone/timezone_controller.cc b/third_party/blink/renderer/core/timezone/timezone_controller.cc
+index 270c78bfd0..2b8b74841b 100644
+--- a/third_party/blink/renderer/core/timezone/timezone_controller.cc
++++ b/third_party/blink/renderer/core/timezone/timezone_controller.cc
+@@ -9,6 +9,7 @@
+ #include "mojo/public/cpp/bindings/pending_remote.h"
+ #include "mojo/public/cpp/bindings/remote.h"
+ #include "third_party/blink/public/common/features.h"
++#include "third_party/blink/public/common/fingerprint/fingerprint_config.h"
+ #include "third_party/blink/public/common/switches.h"
+ #include "third_party/blink/public/common/thread_safe_browser_interface_broker_proxy.h"
+ #include "third_party/blink/public/platform/platform.h"
+@@ -62,6 +63,17 @@ String GetTimezoneId(const icu::TimeZone& timezone) {
+   return String(unicode::ToSpan(unicode_timezone_id));
+ }
+ 
++// Timezone from --fingerprint-data, or null. It replaces the OS timezone as the
++// renderer's "host" timezone: set as the ICU default at startup, and OS
++// timezone changes are ignored. DevTools overrides still apply on top of it.
++String FingerprintTimezoneId() {
++  const FingerprintConfig* fingerprint = FingerprintConfig::Get();
++  if (!fingerprint || fingerprint->timezone.empty()) {
++    return String();
++  }
++  return String::FromUtf8(fingerprint->timezone);
++}
++
+ String GetCurrentTimezoneId() {
+   std::unique_ptr<icu::TimeZone> timezone(icu::TimeZone::createDefault());
+   CHECK(timezone);
+@@ -96,6 +108,17 @@ void NotifyTimezoneChangeOnMainThread() {
+ 
+ TimeZoneController::TimeZoneController() {
+   DCHECK(IsMainThread());
++  if (String fingerprint_timezone = FingerprintTimezoneId();
++      !fingerprint_timezone.IsNull()) {
++    std::unique_ptr<icu::TimeZone> timezone(icu::TimeZone::createTimeZone(
++        icu::UnicodeString(fingerprint_timezone.Ascii().data(), -1, US_INV)));
++    if (timezone && *timezone != icu::TimeZone::getUnknown()) {
++      icu::TimeZone::adoptDefault(timezone.release());
++      host_timezone_id_ = fingerprint_timezone;
++      return;
++    }
++    LOG(ERROR) << "Invalid fingerprint timezone: " << fingerprint_timezone;
++  }
+   if (!base::FeatureList::IsEnabled(kLazyBlinkTimezoneInit)) {
+     host_timezone_id_ = GetCurrentTimezoneId();
+   }
+@@ -251,6 +274,11 @@ bool TimeZoneController::SetIcuTimeZoneAndNotifyV8(const String& timezone_id) {
+ void TimeZoneController::OnTimeZoneChange(const String& timezone_id) {
+   DCHECK(IsMainThread());
+ 
++  // The fingerprint timezone stands in for the OS one; ignore OS changes.
++  if (!FingerprintTimezoneId().IsNull()) {
++    return;
++  }
++
+   base::AutoLock locker(instance().lock_);
+ 
+   // Remember requested timezone id so we can set it when timezone
+diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
+index 3d7a843995..a8f6ae8dd9 100644
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
+@@ -30,6 +30,7 @@
+ #include "components/viz/common/resources/shared_image_format_utils.h"
+ #include "third_party/abseil-cpp/absl/cleanup/cleanup.h"
+ #include "third_party/blink/public/common/metrics/document_update_reason.h"
++#include "third_party/blink/renderer/core/canvas_interventions/fingerprint_noise.h"
+ #include "third_party/blink/public/mojom/devtools/console_message.mojom-blink-forward.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_canvas_text_align.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_canvas_text_baseline.h"
+@@ -469,7 +470,10 @@ ImageData* BaseRenderingContext2D::getImageDataInternal(
+     }
+   }
+ 
+-  scoped_refptr<StaticBitmapImage> snapshot = GetImage();
++  // Noise the whole snapshot (not just the requested rect), so getImageData
++  // agrees with toDataURL/toBlob of the same canvas.
++  scoped_refptr<StaticBitmapImage> snapshot =
++      MaybeNoiseCanvasSnapshot(GetTopExecutionContext(), GetImage());
+ 
+   // Determine if the array should be zero initialized, or if it will be
+   // completely overwritten.
+diff --git a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc b/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
+index 4604be68ad..0c20053bba 100644
+--- a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
++++ b/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
+@@ -29,6 +29,7 @@
+ #include "base/metrics/histogram_macros.h"
+ #include "media/base/audio_glitch_info.h"
+ #include "third_party/blink/public/platform/platform.h"
++#include "third_party/blink/renderer/core/canvas_interventions/fingerprint_noise.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_offline_audio_context_options.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_union_audiocontextrendersizecategory_unsignedlong.h"
+@@ -436,6 +437,10 @@ void OfflineAudioContext::FireCompletionEvent() {
+     if (!rendered_buffer) {
+       return;
+     }
++    for (unsigned i = 0; i < rendered_buffer->numberOfChannels(); ++i) {
++      MaybeNoiseAudioSamples(GetExecutionContext(),
++                             rendered_buffer->getChannelData(i)->AsSpan(), i);
++    }
+ 
+     // Call the offline rendering completion event listener and resolve the
+     // promise too.
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+index 26c0a088cc..713a431464 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -64,6 +64,8 @@
+ #include "media/renderers/paint_canvas_video_renderer.h"
+ #include "media/renderers/video_frame_shared_image_cache.h"
+ #include "third_party/blink/public/common/features.h"
++#include "third_party/blink/renderer/core/canvas_interventions/fingerprint_noise.h"
++#include "third_party/blink/public/common/fingerprint/fingerprint_config.h"
+ #include "third_party/blink/public/common/thread_safe_browser_interface_broker_proxy.h"
+ #include "third_party/blink/public/mojom/gpu/gpu.mojom-blink.h"
+ #include "third_party/blink/public/platform/platform.h"
+@@ -4200,6 +4202,11 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+       return ScriptValue::CreateNull(script_state->GetIsolate());
+     case WebGLDebugRendererInfo::kUnmaskedRendererWebgl:
+       if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
++        if (const FingerprintConfig* fingerprint = FingerprintConfig::Get();
++            fingerprint && !fingerprint->webgl_renderer.empty()) {
++          return WebGLAny(script_state,
++                          String::FromUtf8(fingerprint->webgl_renderer));
++        }
+         return WebGLAny(script_state,
+                         String(ContextGL()->GetString(GL_RENDERER)));
+       }
+@@ -4209,6 +4216,11 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+       return ScriptValue::CreateNull(script_state->GetIsolate());
+     case WebGLDebugRendererInfo::kUnmaskedVendorWebgl:
+       if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
++        if (const FingerprintConfig* fingerprint = FingerprintConfig::Get();
++            fingerprint && !fingerprint->webgl_vendor.empty()) {
++          return WebGLAny(script_state,
++                          String::FromUtf8(fingerprint->webgl_vendor));
++        }
+         return WebGLAny(script_state,
+                         String(ContextGL()->GetString(GL_VENDOR)));
+       }
+@@ -5356,6 +5368,17 @@ void WebGLRenderingContextBase::ReadPixelsHelper(GLint x,
+     }
+     ContextGL()->ReadPixels(x, y, width, height, format, type, data);
+   }
++
++  if (format == GL_RGBA && type == GL_UNSIGNED_BYTE && !buffer && data) {
++    const size_t rgba_size = static_cast<size_t>(width) * height * 4;
++    if (rgba_size <= buffer_size.ValueOrDie()) {
++      // SAFETY: rgba_size bytes from `data` fit in the destination view, as
++      // checked against buffer_size (byteLength - offset) above.
++      MaybeNoiseRgbaPixels(Host()->GetTopExecutionContext(),
++                           UNSAFE_BUFFERS(base::span(data, rgba_size)), width,
++                           height);
++    }
++  }
+ }
+ 
+ void WebGLRenderingContextBase::RenderbufferStorageImpl(
+diff --git a/third_party/blink/renderer/platform/fonts/font_cache.cc b/third_party/blink/renderer/platform/fonts/font_cache.cc
+index 372b10936b..29653191a3 100644
+--- a/third_party/blink/renderer/platform/fonts/font_cache.cc
++++ b/third_party/blink/renderer/platform/fonts/font_cache.cc
+@@ -47,6 +47,8 @@
+ #include "build/build_config.h"
+ #include "skia/ext/font_utils.h"
+ #include "third_party/blink/public/common/features.h"
++#include "base/strings/string_util.h"
++#include "third_party/blink/public/common/fingerprint/fingerprint_config.h"
+ #include "third_party/blink/public/platform/platform.h"
+ #include "third_party/blink/public/platform/web_font_prewarmer.h"
+ #include "third_party/blink/renderer/platform/font_family_names.h"
+@@ -152,12 +154,72 @@ const FontPlatformData* FontCache::SystemFontPlatformData(
+ }
+ #endif
+ 
++namespace {
++
++// Font families installed with every Windows 10/11 (lowercase). Always visible;
++// a family also matches its styled variants ("segoe ui" -> "segoe ui light").
++constexpr std::string_view kWindowsDefaultFonts[] = {
++    "arial",          "bahnschrift",      "calibri",
++    "cambria",        "candara",          "cascadia code",
++    "cascadia mono",  "comic sans ms",    "consolas",
++    "constantia",     "corbel",           "courier new",
++    "ebrima",         "franklin gothic medium",
++    "gabriola",       "gadugi",           "georgia",
++    "holomdl2 assets", "impact",          "ink free",
++    "javanese text",  "leelawadee ui",    "lucida console",
++    "lucida sans unicode", "malgun gothic", "marlett",
++    "microsoft himalaya", "microsoft jhenghei", "microsoft new tai lue",
++    "microsoft phagspa", "microsoft sans serif", "microsoft tai le",
++    "microsoft yahei", "microsoft yi baiti", "mingliu-extb",
++    "mingliu_hkscs-extb", "mongolian baiti", "ms gothic",
++    "ms pgothic",     "ms ui gothic",     "mv boli",
++    "myanmar text",   "nirmala text",     "nirmala ui",
++    "nsimsun",        "palatino linotype", "pmingliu-extb",
++    "sans serif collection", "segoe fluent icons", "segoe mdl2 assets",
++    "segoe print",    "segoe script",     "segoe ui",
++    "simsun",         "sitka",            "sylfaen",
++    "symbol",         "tahoma",           "times new roman",
++    "trebuchet ms",   "verdana",          "webdings",
++    "wingdings",      "yu gothic",
++};
++
++// With a fingerprint noise seed, every font that is not a Windows default is
++// hidden for about half of the profiles (decided per profile and family), so
++// the set of installed fonts no longer identifies the machine across profiles.
++bool IsFontHiddenByFingerprint(const AtomicString& family) {
++  const FingerprintConfig* fingerprint = FingerprintConfig::Get();
++  if (!fingerprint || !fingerprint->noise_seed || family.empty()) {
++    return false;
++  }
++  const std::string name = base::ToLowerASCII(family.Utf8());
++  for (std::string_view default_font : kWindowsDefaultFonts) {
++    if (name == default_font ||
++        (name.starts_with(default_font) && name.size() > default_font.size() &&
++         name[default_font.size()] == ' ')) {
++      return false;
++    }
++  }
++  uint64_t hash = 0xcbf29ce484222325ull ^ fingerprint->noise_seed;
++  for (char c : name) {
++    hash ^= static_cast<uint8_t>(c);
++    hash *= 0x00000100000001b3ull;
++  }
++  return (hash >> 32) % 2 == 0;
++}
++
++}  // namespace
++
+ const FontPlatformData* FontCache::GetFontPlatformData(
+     const FontDescription& font_description,
+     const FontFaceCreationParams& creation_params,
+     AlternateFontName alternate_font_name) {
+   TRACE_EVENT0("fonts", "FontCache::GetFontPlatformData");
+ 
++  if (creation_params.CreationType() == kCreateFontByFamily &&
++      IsFontHiddenByFingerprint(creation_params.Family())) {
++    return nullptr;
++  }
++
+ #if !BUILDFLAG(IS_MAC)
+   if (creation_params.CreationType() == kCreateFontByFamily &&
+       creation_params.Family() == font_family_names::kSystemUi) {

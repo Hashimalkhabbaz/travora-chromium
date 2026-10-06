@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'" />
+  <title>Browser Manager</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Browser Manager</div>
+    <div class="browser-info" id="browserInfo"></div>
+    <div class="spacer"></div>
+    <button class="btn ghost" id="settingsBtn">Settings</button>
+    <button class="btn primary" id="newProfileBtn">+ New profile</button>
+  </header>
+
+  <section class="settings hidden" id="settingsPanel">
+    <div class="field grow">
+      <label for="browserPath">Patched Chromium executable</label>
+      <div class="row">
+        <input id="browserPath" type="text" spellcheck="false" />
+        <button class="btn ghost" id="browseBtn">Browse…</button>
+      </div>
+    </div>
+    <div class="field end">
+      <button class="btn primary" id="saveSettingsBtn">Save</button>
+    </div>
+  </section>
+
+  <main>
+    <div class="empty hidden" id="emptyState">
+      <p>No profiles yet.</p>
+      <p class="muted">Each profile gets its own fingerprint, storage, cookies and proxy.</p>
+    </div>
+    <table class="profiles hidden" id="profilesTable">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>OS</th>
+          <th>Screen</th>
+          <th>GPU</th>
+          <th>HW</th>
+          <th>Proxy</th>
+          <th>Status</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="profilesBody"></tbody>
+    </table>
+  </main>
+
+  <div class="toast hidden" id="toast"></div>
+
+  <dialog id="profileDialog">
+    <form method="dialog" id="profileForm">
+      <h2 id="dialogTitle">New profile</h2>
+      <input type="hidden" name="id" />
+      <div class="row">
+        <div class="field grow">
+          <label for="pfName">Name</label>
+          <input id="pfName" name="name" type="text" required />
+        </div>
+        <div class="field">
+          <label for="pfColor">Color</label>
+          <input id="pfColor" name="color" type="color" />
+        </div>
+      </div>
+      <div class="row">
+        <div class="field grow create-only">
+          <label for="pfOs">Operating system</label>
+          <select id="pfOs" name="os"></select>
+        </div>
+        <div class="field grow">
+          <label for="pfLocale">Language <span class="muted">(auto = proxy's country)</span></label>
+          <input id="pfLocale" name="locale" type="text" value="auto" required spellcheck="false" />
+        </div>
+      </div>
+      <div class="field">
+        <label for="pfProxy">Proxy <span class="muted">(optional)</span></label>
+        <input id="pfProxy" name="proxy" type="text" spellcheck="false" placeholder="host:port:user:pass, http://user:pass@host:port or socks5://..." />
+      </div>
+      <div class="dialog-actions">
+        <button class="btn ghost" value="cancel" formnovalidate>Cancel</button>
+        <button class="btn primary" value="save" id="dialogSubmit">Create</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
