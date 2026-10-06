@@ -11,6 +11,8 @@ const { generateFingerprint } = require('../src/main/fingerprints');
 const { applyProfileSettings } = require('../src/main/chrome-profile');
 const { lookupProxyGeo } = require('../src/main/proxy-geo');
 const { buildLaunchConfig, newNoiseSeed } = require('../src/main/launch-config');
+const { getHostHardware } = require('../src/main/host-hardware');
+const { compatibleFingerprint } = require('../src/main/profile-compatibility');
 
 let nextPort = 9333;
 
@@ -19,14 +21,16 @@ let nextPort = 9333;
  * @param options.noiseSeed  hex seed, or null to disable noise
  * @param options.fingerprint reuse a fingerprint (to compare only noise)
  */
-async function launchTestProfile({ proxy = '', noiseSeed = newNoiseSeed(), fingerprint, locale = 'auto', os: fpOs = 'windows' } = {}) {
+async function launchTestProfile({ proxy = '', noiseSeed = newNoiseSeed(), fingerprint, locale = 'auto', os: fpOs = 'windows', fingerprintSettings } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bm-test-'));
   const store = new Store(root);
   const { browserPath } = store.getSettings();
   const version = detectBrowserVersion(browserPath);
+  const hardware = await getHostHardware(browserPath);
   fingerprint ??= generateFingerprint({ os: fpOs, locale: 'en-US', engineVersion: version });
+  fingerprint = compatibleFingerprint({ fingerprint, os: fpOs, locale, fingerprintSettings }, hardware, version);
 
-  let profile = store.createProfile({ name: 'test', os: fpOs, locale, proxy, color: '#1a73e8', noiseSeed, fingerprint });
+  let profile = store.createProfile({ name: 'test', os: fpOs, locale, proxy, color: '#1a73e8', noiseSeed, fingerprint, fingerprintSettings });
   if (proxy) profile = store.updateProfile(profile.id, { proxyGeo: await lookupProxyGeo(proxy) });
   const config = buildLaunchConfig(profile, { systemLocale: 'en-US' });
   if (!noiseSeed) delete config.nativeConfig.noiseSeed;
@@ -36,6 +40,10 @@ async function launchTestProfile({ proxy = '', noiseSeed = newNoiseSeed(), finge
     color: profile.color,
     languages: config.languages,
     proxied: Boolean(proxy),
+    webrtcPolicy: config.webrtcPolicy,
+    locationPermission: config.locationPermission,
+    doNotTrack: config.doNotTrack,
+    acceleration: config.acceleration,
   });
 
   const port = nextPort++;
@@ -46,7 +54,7 @@ async function launchTestProfile({ proxy = '', noiseSeed = newNoiseSeed(), finge
     nativeConfig: config.nativeConfig,
     language: config.language,
     windowSize: { width: 1200, height: 760 },
-    extraArgs: [`--remote-debugging-port=${port}`],
+    extraArgs: [...config.extraArgs, `--remote-debugging-port=${port}`],
   });
 
   let browser;

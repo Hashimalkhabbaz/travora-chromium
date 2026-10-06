@@ -27,7 +27,7 @@ const COUNTRY_LOCALES = {
  */
 function resolveLanguages(language, countryCode, fallback = 'en-US') {
   const primary =
-    language && language !== 'auto' ? language : COUNTRY_LOCALES[countryCode] || (countryCode ? 'en-US' : fallback);
+    language === 'real' ? fallback : language && language !== 'auto' ? language : COUNTRY_LOCALES[countryCode] || (countryCode ? 'en-US' : fallback);
   const base = primary.split('-')[0];
   const list = [primary, base];
   if (base !== 'en') list.push('en-US', 'en');

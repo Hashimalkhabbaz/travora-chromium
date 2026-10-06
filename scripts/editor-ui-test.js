@@ -1,0 +1,102 @@
+// Exercise the real Electron editor against an isolated data directory.
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { _electron } = require('playwright-core');
+const { Store } = require('../src/main/store');
+
+(async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bm-editor-ui-'));
+  let app;
+  try {
+    const env = { ...process.env, BM_DATA_DIR: root };
+    delete env.ELECTRON_RUN_AS_NODE;
+    app = await _electron.launch({ args: [path.resolve(__dirname, '..')], env, timeout: 60000 });
+    const page = await app.firstWindow();
+    const errors = [];
+    page.on('pageerror', error => errors.push(error.message));
+    await page.locator('#newProfileBtn').click();
+    await page.waitForFunction(() => !document.getElementById('dialogSubmit').disabled, { timeout: 60000 });
+    await page.locator('#pfName').fill('Editor regression');
+    await page.locator('#pfWebglMode').selectOption('custom');
+    for (const [vendor, minimum] of [['Intel', 20], ['AMD', 25], ['Microsoft', 1], ['Apple', 12]]) {
+      await page.locator('#pfVendorPreset').selectOption(`Google Inc. (${vendor})`);
+      const generated = await page.locator('#pfRenderer').inputValue();
+      assert(generated.startsWith(`ANGLE (${vendor},`), vendor + ' must fill a matching renderer automatically');
+      assert.equal(await page.locator('#pfGpuPreset').inputValue(), generated);
+      const choices = await page.locator('#pfGpuPreset option').evaluateAll(nodes => nodes.map(node => node.value).filter(Boolean));
+      assert(choices.length >= minimum, vendor + ' must expose its expanded catalogue');
+      assert.equal(new Set(choices).size, choices.length, 'Presets must not contain duplicate renderers');
+      assert(choices.every(value => value.startsWith(`ANGLE (${vendor},`)), 'Renderer list must match the selected vendor');
+      await page.locator('#pfGpuPreset').selectOption(choices.at(-1));
+      assert.equal(await page.locator('#pfRenderer').inputValue(), choices.at(-1), 'Choosing another GPU must fill its complete renderer');
+    }
+    await page.locator('#pfVendorPreset').selectOption('Google Inc. (NVIDIA)');
+    const renderer = await page.locator('#pfRenderer').inputValue();
+    assert.equal(renderer, 'ANGLE (NVIDIA, NVIDIA GeForce GT 710 (0x0000128B) Direct3D11 vs_5_0 ps_5_0, D3D11)');
+    assert.equal(await page.locator('#pfGpuPreset').inputValue(), renderer);
+    const nvidiaChoices = await page.locator('#pfGpuPreset option').evaluateAll(nodes => nodes.map(node => node.value).filter(Boolean));
+    assert(nvidiaChoices.length >= 30, 'NVIDIA must expose the expanded catalogue');
+    assert(nvidiaChoices.some(value => value.includes('NVIDIA GeForce RTX 5080 (')), 'Expanded RTX presets must be available');
+    await page.locator('#pfGpuPreset').selectOption(nvidiaChoices.at(-1));
+    assert.equal(await page.locator('#pfRenderer').inputValue(), nvidiaChoices.at(-1));
+    await page.locator('#pfGpuPreset').selectOption(renderer);
+    await page.locator('#pfWebgpuMode').selectOption('custom');
+    await page.locator('#pfWgpuVendor').fill('nvidia');
+    await page.locator('#pfWgpuArch').fill('kepler');
+    await page.locator('#pfWgpuDevice').fill('128b');
+    await page.locator('#pfCpuMode').selectOption('custom'); await page.locator('#pfCores').fill('8');
+    await page.locator('#pfMemoryMode').selectOption('custom'); await page.locator('#pfMemory').selectOption('8');
+    await page.locator('#pfScreenMode').selectOption('custom'); await page.locator('#pfScreenPreset').selectOption('1920x1080');
+    await page.locator('#pfCanvasNoise').uncheck(); await page.locator('#pfGlNoise').check(); await page.locator('#pfAudioNoise').uncheck(); await page.locator('#pfRectsNoise').check();
+    await page.locator('#pfTimezoneMode').selectOption('custom'); await page.locator('#pfTimezone').fill('Asia/Tokyo');
+    await page.locator('#pfLocationMode').selectOption('block');
+    await page.locator('#pfLanguageMode').selectOption('custom'); await page.locator('#pfLocale').fill('ja-JP');
+    await page.locator('#pfWebrtc').selectOption('disabled');
+    await page.locator('#dialogSubmit').click();
+    await page.waitForFunction(() => !document.getElementById('profileDialog').open);
+    const store = new Store(root);
+    const saved = store.listProfiles()[0];
+    assert.equal(saved.fingerprint.fingerprint.videoCard.renderer, renderer);
+    assert.equal(saved.fingerprintSettings.webgpu.architecture, 'kepler');
+    assert.equal(saved.locale, 'ja-JP');
+    const marker = path.join(store.userDataDir(saved.id), 'session-marker'); fs.writeFileSync(marker, 'keep');
+    await page.getByRole('button', { name: 'Edit', exact: true }).click();
+    await page.waitForFunction(() => !document.getElementById('dialogSubmit').disabled);
+    assert.equal(await page.locator('#pfRenderer').inputValue(), renderer);
+    assert.equal(await page.locator('#pfWebgpuMode').inputValue(), 'custom');
+    assert.equal(await page.locator('#pfWgpuArch').inputValue(), 'kepler');
+    assert.equal(await page.locator('#pfCanvasNoise').isChecked(), false);
+    assert.equal(await page.locator('#pfGlNoise').isChecked(), true);
+    assert.equal(await page.locator('#pfRectsNoise').isChecked(), true);
+    assert.equal(await page.locator('#pfLocationMode').inputValue(), 'block');
+    assert.equal(await page.locator('#pfScreenPreset').inputValue(), '1920x1080');
+    await page.locator('#pfTimezone').fill('Wrong/Timezone');
+    await page.locator('#dialogSubmit').click();
+    await page.locator('#toast.error').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('#profileDialog').evaluate(node => node.open), true, 'Validation error must retain editor values');
+    assert.equal(await page.locator('#pfRenderer').inputValue(), renderer);
+    await page.locator('#pfTimezone').fill('Asia/Tokyo');
+    const out = path.resolve('audit-results/editor-verification'); fs.mkdirSync(out, { recursive: true });
+    await page.locator('#gpuCustom').scrollIntoViewIfNeeded();
+    await page.screenshot({ path: path.join(out, 'editor-graphics.png') });
+    await page.locator('#pfCanvasNoise').scrollIntoViewIfNeeded();
+    await page.screenshot({ path: path.join(out, 'editor-noise.png') });
+    await page.locator('#dialogSubmit').click();
+    await page.waitForFunction(() => !document.getElementById('profileDialog').open);
+    const again = store.getProfile(saved.id);
+    assert.equal(again.id, saved.id); assert.equal(again.noiseSeed, saved.noiseSeed); assert.equal(fs.readFileSync(marker, 'utf8'), 'keep');
+    await page.getByRole('button', { name: 'Edit', exact: true }).click();
+    await page.waitForFunction(() => !document.getElementById('dialogSubmit').disabled);
+    await page.locator('#pfRenderer').fill('Unsaved renderer');
+    await page.locator('#dialogCancel').click();
+    assert.equal(store.getProfile(saved.id).fingerprint.fingerprint.videoCard.renderer, renderer);
+    assert.deepEqual(errors, []);
+    console.log('PASS: Electron Create/Edit saves and reloads manual GPU/hardware/noise choices; errors retain input; Cancel makes no changes; ID, seed and session preserved. Screenshots saved.');
+  } finally {
+    if (app) await app.close();
+    // root is a test-owned absolute mkdtemp directory.
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+})().catch(error => { console.error(error); process.exitCode = 1; });

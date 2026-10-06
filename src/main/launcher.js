@@ -3,6 +3,7 @@ const path = require('path');
 const { spawn, execFileSync } = require('child_process');
 const { EventEmitter } = require('events');
 const { anonymizeProxy, closeAnonymizedProxy } = require('proxy-chain');
+const { assertNativeSettings } = require('./fingerprint-settings');
 
 /**
  * Starts and stops browser instances, one per profile.
@@ -43,6 +44,7 @@ class Launcher extends EventEmitter {
     if (!browserPath || !fs.existsSync(browserPath)) {
       throw new Error(`Browser executable not found: ${browserPath || '(not set)'}`);
     }
+    assertNativeSettings(profile, browserPath);
 
     const upstream = normalizeProxyUrl(profile.proxy);
     // Returns the URL unchanged when it has no credentials.

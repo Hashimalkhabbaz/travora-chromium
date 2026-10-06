@@ -2,7 +2,10 @@ const path = require('path');
 const { app, BrowserWindow, ipcMain, dialog, screen } = require('electron');
 const { Store } = require('./store');
 const { Launcher, detectBrowserVersion, parseProxy } = require('./launcher');
-const { generateFingerprint, alignToEngineVersion, summarize, OS_OPTIONS } = require('./fingerprints');
+const { generateFingerprint, summarize, OS_OPTIONS } = require('./fingerprints');
+const { getHostHardware, HOST_OS } = require('./host-hardware');
+const { alignStoredProfile, compatibleFingerprint } = require('./profile-compatibility');
+const { settingsFor, validateSettings, hasNoise } = require('./fingerprint-settings');
 const { buildLaunchConfig, newNoiseSeed } = require('./launch-config');
 const { applyProfileSettings, pickColor, PALETTE } = require('./chrome-profile');
 const { lookupProxyGeo } = require('./proxy-geo');
@@ -12,6 +15,12 @@ let store;
 const launcher = new Launcher();
 
 const versionCache = new Map(); // browserPath -> version
+let hardwareNeedsRefresh = false;
+async function browserHardware() {
+  const refresh = hardwareNeedsRefresh;
+  hardwareNeedsRefresh = false;
+  return getHostHardware(store.getSettings().browserPath, { refresh });
+}
 function browserVersion() {
   const { browserPath } = store.getSettings();
   if (!versionCache.has(browserPath)) versionCache.set(browserPath, detectBrowserVersion(browserPath));
@@ -70,7 +79,8 @@ function proxyHost(proxy) {
 // 'auto' (follow the proxy's country) or a locale like 'it-IT' / 'en'.
 function validateLanguage(language) {
   const value = (language || 'auto').trim();
-  if (value === 'auto' || /^[a-z]{2,3}(-[A-Za-z]{2,4})?$/.test(value)) return value;
+  if (value === 'auto' || value === 'real') return value;
+  try { if (Intl.getCanonicalLocales(value).length === 1) return Intl.getCanonicalLocales(value)[0]; } catch {}
   throw new Error(`Invalid language: ${language} (use "auto" or e.g. it-IT)`);
 }
 
@@ -81,6 +91,12 @@ function validateProxy(proxy) {
 }
 
 function registerIpc() {
+  ipcMain.handle('profiles:editData', async (_e, id) => {
+    const hardware = await browserHardware();
+    const profile = id ? store.getProfile(id) : { fingerprint: generateFingerprint({ hardware, engineVersion: browserVersion() }), noiseSeed: 'preview' };
+    if (!profile) throw new Error('Profile not found');
+    return { settings: settingsFor(profile), hardware };
+  });
   ipcMain.handle('app:init', () => ({
     settings: store.getSettings(),
     browserVersion: browserVersion(),
@@ -105,14 +121,16 @@ function registerIpc() {
     return result.canceled ? null : result.filePaths[0];
   });
 
-  ipcMain.handle('profiles:create', (_e, { name, os, locale, proxy, color }) => {
+  ipcMain.handle('profiles:create', async (_e, { name, os, locale, proxy, color, fingerprintSettings }) => {
     const language = validateLanguage(locale);
+    const hardware = await browserHardware();
     const fingerprint = generateFingerprint({
       os,
-      locale: language === 'auto' ? 'en-US' : language,
+      locale: language === 'auto' || language === 'real' ? app.getLocale() : language,
       engineVersion: browserVersion(),
+      hardware,
     });
-    const profile = store.createProfile({
+    const draft = {
       name,
       os,
       locale: language,
@@ -120,28 +138,44 @@ function registerIpc() {
       color: color ? validateColor(color) : pickColor(store.listProfiles().length),
       noiseSeed: newNoiseSeed(),
       fingerprint,
-    });
+    };
+    if (fingerprintSettings) {
+      draft.fingerprintSettings = validateSettings(fingerprintSettings, draft);
+      draft.fingerprint = compatibleFingerprint(draft, hardware, browserVersion());
+    }
+    const profile = store.createProfile(draft);
     return toView(profile);
   });
 
-  ipcMain.handle('profiles:update', (_e, { id, name, proxy, color, locale }) => {
+  ipcMain.handle('profiles:update', async (_e, { id, name, proxy, color, locale, fingerprintSettings }) => {
     const current = store.getProfile(id);
+    if (!current) throw new Error('Profile not found');
+    if (launcher.isRunning(id)) throw new Error('Stop the browser before editing its settings');
     const nextProxy = validateProxy(proxy);
     const patch = { name, proxy: nextProxy, color: validateColor(color), locale: validateLanguage(locale) };
     if (current && current.proxy !== nextProxy) patch.proxyGeo = null; // location must be re-checked
+    if (fingerprintSettings) {
+      patch.fingerprintSettings = validateSettings(fingerprintSettings, current);
+      const hardware = await browserHardware();
+      patch.fingerprint = compatibleFingerprint({ ...current, ...patch }, hardware, browserVersion());
+      patch.os = HOST_OS;
+      if (hasNoise(patch.fingerprintSettings) && !current.noiseSeed) patch.noiseSeed = newNoiseSeed();
+    }
     return toView(store.updateProfile(id, patch));
   });
 
-  ipcMain.handle('profiles:regenerate', (_e, id) => {
+  ipcMain.handle('profiles:regenerate', async (_e, id) => {
     if (launcher.isRunning(id)) throw new Error('Stop the browser before regenerating its fingerprint');
     const profile = store.getProfile(id);
-    const fingerprint = generateFingerprint({
-      os: profile.os,
-      locale: profile.locale === 'auto' ? 'en-US' : profile.locale,
+    let fingerprint = generateFingerprint({
+      os: HOST_OS,
+      locale: profile.locale === 'auto' || profile.locale === 'real' ? app.getLocale() : profile.locale,
       engineVersion: browserVersion(),
+      hardware: await browserHardware(),
     });
+    if (profile.fingerprintSettings) fingerprint = compatibleFingerprint({ ...profile, os: HOST_OS, fingerprint }, await browserHardware(), browserVersion());
     // A new identity also gets new canvas/audio/font noise.
-    return toView(store.updateProfile(id, { fingerprint, noiseSeed: newNoiseSeed() }));
+    return toView(store.updateProfile(id, { os: HOST_OS, fingerprint, noiseSeed: newNoiseSeed() }));
   });
 
   ipcMain.handle('profiles:checkProxy', async (_e, id) => {
@@ -159,17 +193,11 @@ function registerIpc() {
   ipcMain.handle('profiles:launch', async (_e, id) => {
     let profile = store.getProfile(id);
     if (!profile) throw new Error('Profile not found');
+    if (launcher.isRunning(id)) throw new Error('Profile is already running');
     const settings = store.getSettings();
+    profile = alignStoredProfile(store, profile, await browserHardware(), browserVersion());
 
-    // Keep the claimed browser version in sync with the binary (after a rebuild/update).
-    const version = browserVersion();
-    const claimed = profile.fingerprint.fingerprint.navigator.userAgentData?.uaFullVersion;
-    if (version && claimed !== version) {
-      alignToEngineVersion(profile.fingerprint, version);
-      profile = store.updateProfile(id, { fingerprint: profile.fingerprint });
-    }
-
-    if (!profile.noiseSeed) profile = store.updateProfile(id, { noiseSeed: newNoiseSeed() });
+    if (!profile.noiseSeed && hasNoise(settingsFor(profile))) profile = store.updateProfile(id, { noiseSeed: newNoiseSeed() });
 
     // With a proxy, websites see the proxy's location: timezone, geolocation and
     // (language "auto") languages follow it. Checked on every launch, which also
@@ -177,7 +205,8 @@ function registerIpc() {
     if (profile.proxy) {
       profile = store.updateProfile(id, { proxyGeo: await lookupProxyGeo(profile.proxy) });
     }
-    const { nativeConfig, language, languages } = buildLaunchConfig(profile, { systemLocale: app.getLocale() });
+    const config = buildLaunchConfig(profile, { systemLocale: app.getLocale() });
+    const { nativeConfig, language, languages } = config;
 
     // Name/color shown inside the browser, languages, and WebRTC leak protection.
     applyProfileSettings(store.userDataDir(id), {
@@ -185,6 +214,10 @@ function registerIpc() {
       color: profileColor(profile),
       languages,
       proxied: Boolean(profile.proxy),
+      webrtcPolicy: config.webrtcPolicy,
+      locationPermission: config.locationPermission,
+      doNotTrack: config.doNotTrack,
+      acceleration: config.acceleration,
     });
 
     await launcher.launch(profile, {
@@ -193,6 +226,7 @@ function registerIpc() {
       nativeConfig,
       language,
       windowSize: windowSizeFor(profile),
+      extraArgs: config.extraArgs,
     });
   });
 
@@ -226,6 +260,7 @@ app.whenReady().then(() => {
   launcher.on('error', (id, message) => send('profiles:error', { id, message }));
 
   registerIpc();
+  screen.on('display-metrics-changed', () => { hardwareNeedsRefresh = true; });
   createWindow();
 });
 

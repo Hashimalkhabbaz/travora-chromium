@@ -7,7 +7,12 @@
     "start": "node scripts/start.js",
     "smoke": "node scripts/smoke-test.js",
     "test:noise": "node scripts/noise-test.js",
+    "test:compatibility": "node scripts/compatibility-test.js",
+    "test:editor": "node scripts/editor-test.js",
+    "test:editor:ui": "node scripts/editor-ui-test.js",
+    "test:editor:native": "node scripts/editor-native-test.js",
     "audit:sites": "node scripts/site-audit.js",
+    "profiles:align": "node scripts/align-profiles.js",
     "postinstall": "node node_modules/electron/install.js"
   },
   "author": "",

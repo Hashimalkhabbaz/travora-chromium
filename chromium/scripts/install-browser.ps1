@@ -13,6 +13,7 @@ param(
   [int]$Keep = 3
 )
 $ErrorActionPreference = 'Stop'
+$resolvedInstallRoot = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
 
 $files = @(
   'chrome.exe', 'chrome.dll', 'chrome_100_percent.pak', 'chrome_200_percent.pak',
@@ -44,6 +45,8 @@ foreach ($g in $globs) {
 }
 
 $exe = Join-Path $target 'chrome.exe'
+# Describes the native fields supported by this build, for manager validation.
+Set-Content -LiteralPath (Join-Path $target 'fingerprint-capabilities.json') -Encoding ascii -Value '{"schema":2,"independentNoise":true,"webgpuMetadata":true,"webgpuDisabled":true,"fontAllowlist":true,"webrtcDisabled":true}'
 Set-Content -Path (Join-Path $InstallRoot 'latest.txt') -Value $exe -Encoding ascii
 Write-Output "Installed $version -> $exe"
 
@@ -58,6 +61,10 @@ Get-ChildItem $InstallRoot -Directory |
     if ($running -contains $_.FullName) {
       Write-Output "Kept $($_.Name) (in use by an open profile)"
     } else {
+      $resolvedOldInstall = [IO.Path]::GetFullPath($_.FullName)
+      if (-not $resolvedOldInstall.StartsWith($resolvedInstallRoot + '\', [StringComparison]::OrdinalIgnoreCase) -or ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Refusing to delete an install outside the verified install root: $resolvedOldInstall"
+      }
       Remove-Item -LiteralPath $_.FullName -Recurse -Force
       Write-Output "Removed old install $($_.Name)"
     }

@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const { toNativeConfig } = require('./fingerprints');
 const { resolveLanguages } = require('./languages');
+const { settingsFor, browserChoices, gpuMetadata, hasNoise } = require('./fingerprint-settings');
 
 /** Random per-profile key for canvas/WebGL/audio noise and the font subset. */
 function newNoiseSeed() {
@@ -21,12 +22,25 @@ function buildLaunchConfig(profile, { systemLocale = 'en-US' } = {}) {
   const geo = profile.proxy && profile.proxyGeo?.proxy === profile.proxy ? profile.proxyGeo : null;
   const { primary, list } = resolveLanguages(profile.locale, geo?.countryCode, systemLocale);
 
-  const nativeConfig = { ...toNativeConfig(profile.fingerprint), noiseSeed: profile.noiseSeed };
-  if (geo) {
-    nativeConfig.timezone = geo.timezone;
-    nativeConfig.geo = nearbyPosition(geo, profile.noiseSeed);
+  const s = settingsFor(profile);
+  const choices = browserChoices(profile, systemLocale);
+  const nativeConfig = { ...toNativeConfig(profile.fingerprint) };
+  if (hasNoise(s) && profile.noiseSeed) nativeConfig.noiseSeed = profile.noiseSeed;
+  // Only explicitly edited profiles need the new fields. Seed-only configs
+  // keep compatibility with existing builds and their original outputs.
+  if (profile.fingerprintSettings) {
+    nativeConfig.noise = { ...s.noise, fonts: s.fonts.mode === 'subset' };
+    if (s.fonts.mode === 'custom') nativeConfig.fontAllowlist = s.fonts.allowed;
+    if (s.webrtc === 'disabled') nativeConfig.webrtcDisabled = true;
+    if (s.webgpu.mode === 'disabled') nativeConfig.webgpu = { disabled: true };
+    else if (s.webgpu.mode === 'custom') nativeConfig.webgpu = { custom: true, vendor: s.webgpu.vendor, architecture: s.webgpu.architecture, device: s.webgpu.device, description: s.webgpu.description };
+    else if (s.webgpu.mode === 'webgl' && s.webgl.mode === 'custom') nativeConfig.webgpu = { custom: true, ...gpuMetadata(s.webgl) };
   }
-  return { nativeConfig, language: primary, languages: list };
+  if (s.timezone.mode === 'custom') nativeConfig.timezone = s.timezone.value;
+  else if (s.timezone.mode === 'proxy' && geo) nativeConfig.timezone = geo.timezone;
+  if (s.location.mode === 'custom') nativeConfig.geo = { lat: s.location.lat, lon: s.location.lon, accuracy: s.location.accuracy };
+  else if (s.location.mode === 'proxy' && geo) nativeConfig.geo = nearbyPosition(geo, profile.noiseSeed || profile.id);
+  return { nativeConfig, language: choices.displayLanguage || primary, languages: list, ...choices };
 }
 
 /**

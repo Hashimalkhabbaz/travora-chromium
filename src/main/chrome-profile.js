@@ -37,7 +37,7 @@ function isDark(hex) {
   return 0.299 * r + 0.587 * g + 0.114 * b < 150;
 }
 
-function applyProfileSettings(userDataDir, { name, color, languages, proxied }) {
+function applyProfileSettings(userDataDir, { name, color, languages, proxied, webrtcPolicy, locationPermission, doNotTrack, acceleration }) {
   const skColor = toSkColor(color);
 
   updateJson(path.join(userDataDir, PROFILE_DIR, 'Preferences'), (prefs) => {
@@ -66,11 +66,25 @@ function applyProfileSettings(userDataDir, { name, color, languages, proxied }) 
     }
     prefs.webrtc = {
       ...prefs.webrtc,
-      ip_handling_policy: proxied ? 'disable_non_proxied_udp' : 'default',
+      ip_handling_policy: webrtcPolicy || (proxied ? 'disable_non_proxied_udp' : 'default'),
     };
+    if (locationPermission) {
+      prefs.profile.default_content_setting_values = { ...prefs.profile.default_content_setting_values, geolocation: locationPermission };
+      // Remove existing per-site grants when the user switches to Ask or Block.
+      if (locationPermission !== 1 && prefs.profile.content_settings?.exceptions) delete prefs.profile.content_settings.exceptions.geolocation;
+    }
+    if (doNotTrack) {
+      if (doNotTrack === 'default') delete prefs.enable_do_not_track;
+      else prefs.enable_do_not_track = doNotTrack === 'on';
+    }
   });
 
   updateJson(path.join(userDataDir, 'Local State'), (state) => {
+    if (acceleration) {
+      state.hardware_acceleration_mode = { ...state.hardware_acceleration_mode };
+      if (acceleration === 'default') delete state.hardware_acceleration_mode.enabled;
+      else state.hardware_acceleration_mode.enabled = acceleration === 'on';
+    }
     state.profile = state.profile || {};
     state.profile.info_cache = state.profile.info_cache || {};
     state.profile.info_cache[PROFILE_DIR] = {

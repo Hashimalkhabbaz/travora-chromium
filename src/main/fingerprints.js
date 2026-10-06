@@ -2,7 +2,9 @@ const { FingerprintGenerator } = require('fingerprint-generator');
 
 const generator = new FingerprintGenerator();
 
-const OS_OPTIONS = ['windows', 'macos', 'linux'];
+const { HOST_OS } = require('./host-hardware');
+// Cross-OS identities disagree with native fonts, voices and rendering.
+const OS_OPTIONS = [HOST_OS].filter(Boolean);
 
 /**
  * Generate a realistic desktop Chrome fingerprint (+ matching HTTP headers).
@@ -10,8 +12,8 @@ const OS_OPTIONS = ['windows', 'macos', 'linux'];
  * (e.g. "154.0.8037.98"); the fingerprint is rewritten to claim that version,
  * because a UA that disagrees with the real engine's features is a giveaway.
  */
-function generateFingerprint({ os = 'windows', locale = 'en-US', engineVersion = null } = {}) {
-  if (!OS_OPTIONS.includes(os)) throw new Error(`Unsupported OS: ${os}`);
+function generateFingerprint({ os = HOST_OS, locale = 'en-US', engineVersion = null, hardware = null } = {}) {
+  if (!OS_OPTIONS.includes(os)) throw new Error(`Use ${HOST_OS} fingerprints on this machine; ${os} does not match the host OS`);
 
   const result = generator.getFingerprint({
     browsers: [{ name: 'chrome' }],
@@ -21,6 +23,27 @@ function generateFingerprint({ os = 'windows', locale = 'en-US', engineVersion =
   });
 
   if (engineVersion) alignToEngineVersion(result, engineVersion);
+  if (hardware) alignToHostHardware(result, hardware);
+  return result;
+}
+
+function alignToHostHardware(result, hardware) {
+  const { fingerprint, headers } = result;
+  const nav = fingerprint.navigator;
+  if (nav.userAgentData?.platform !== hardware.hints.platform) throw new Error('Fingerprint OS does not match measured browser OS');
+  nav.platform = hardware.platform;
+  for (const key of ['platform', 'platformVersion', 'architecture', 'bitness']) nav.userAgentData[key] = hardware.hints[key];
+  fingerprint.videoCard = { ...fingerprint.videoCard, ...hardware.webgl };
+  Object.assign(fingerprint.screen, {
+    devicePixelRatio: hardware.devicePixelRatio,
+    colorDepth: hardware.screen.colorDepth,
+    pixelDepth: hardware.screen.pixelDepth,
+  });
+  headers['sec-ch-ua-platform'] = JSON.stringify(hardware.hints.platform);
+  headers['sec-ch-ua-mobile'] = '?0';
+  // Remember which identity is backed by the actual GPU. It can use the
+  // browser's native query path instead of the patched string override.
+  result.nativeRendering = { webgl: { ...hardware.webgl } };
   return result;
 }
 
@@ -73,12 +96,14 @@ function chromeBrandList(seed, version, fullVersion) {
  * The compact config our patched Chromium reads from --fingerprint-data
  * (schema: third_party/blink/public/common/fingerprint/fingerprint_config.h).
  */
-function toNativeConfig({ fingerprint }) {
+function toNativeConfig({ fingerprint, nativeRendering }) {
   const nav = fingerprint.navigator;
   const uad = nav.userAgentData || {};
   const s = fingerprint.screen;
   // Chrome 154 reports deviceMemory as a power of two clamped to [2, 32] on desktop.
   const memory = Math.min(32, Math.max(2, 2 ** Math.round(Math.log2(nav.deviceMemory || 8))));
+  const nativeGpu = nativeRendering?.webgl?.vendor === fingerprint.videoCard?.vendor
+    && nativeRendering?.webgl?.renderer === fingerprint.videoCard?.renderer;
   return {
     ua: nav.userAgent,
     platform: nav.platform,
@@ -98,7 +123,7 @@ function toNativeConfig({ fingerprint }) {
       availHeight: s.availHeight,
       colorDepth: s.colorDepth,
     },
-    webgl: { vendor: fingerprint.videoCard?.vendor, renderer: fingerprint.videoCard?.renderer },
+    ...(nativeGpu ? {} : { webgl: { vendor: fingerprint.videoCard?.vendor, renderer: fingerprint.videoCard?.renderer } }),
   };
 }
 
@@ -116,4 +141,4 @@ function summarize({ fingerprint }) {
   };
 }
 
-module.exports = { generateFingerprint, alignToEngineVersion, toNativeConfig, summarize, OS_OPTIONS };
+module.exports = { generateFingerprint, alignToEngineVersion, alignToHostHardware, toNativeConfig, summarize, OS_OPTIONS };

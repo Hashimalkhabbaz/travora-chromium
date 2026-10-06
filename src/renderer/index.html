@@ -72,21 +72,65 @@
           <select id="pfOs" name="os"></select>
         </div>
         <div class="field grow">
-          <label for="pfLocale">Language <span class="muted">(auto = proxy's country)</span></label>
-          <input id="pfLocale" name="locale" type="text" value="auto" required spellcheck="false" />
+          <label for="pfLanguageMode">Browser language</label>
+          <select id="pfLanguageMode"><option value="auto">Based on IP</option><option value="real">Real system language</option><option value="custom">Custom</option></select>
+          <input id="pfLocale" name="locale" type="text" value="en-US" spellcheck="false" aria-label="Custom browser language" placeholder="e.g. it-IT" />
         </div>
       </div>
       <div class="field">
         <label for="pfProxy">Proxy <span class="muted">(optional)</span></label>
         <input id="pfProxy" name="proxy" type="text" spellcheck="false" placeholder="host:port:user:pass, http://user:pass@host:port or socks5://..." />
       </div>
+      <p id="editorLoading" class="muted" role="status">Loading fingerprint settings...</p>
+      <fieldset id="fingerprintEditor" disabled>
+        <legend>Fingerprint</legend>
+        <p class="muted">Choose the values for this profile. Custom choices stay saved and are used on each launch.</p>
+        <details open>
+          <summary>Graphics and hardware</summary>
+          <div class="setting-row"><label for="pfWebglMode">WebGL metadata</label><div><select id="pfWebglMode"><option value="real">Real GPU</option><option value="custom">Custom</option></select><p id="realGpu" class="help"></p></div></div>
+          <div id="gpuCustom" class="custom-panel">
+            <div class="field"><label for="pfVendorPreset">Vendor</label><select id="pfVendorPreset"><option>Google Inc. (Intel)</option><option>Google Inc. (AMD)</option><option>Google Inc. (NVIDIA)</option><option>Google Inc. (Microsoft)</option><option>Google Inc. (Apple)</option><option value="other">Other</option></select><input id="pfVendor" aria-label="Custom WebGL vendor" spellcheck="false" /></div>
+            <div class="field"><label for="pfGpuPreset">Renderer</label><select id="pfGpuPreset"><option value="">Enter a renderer</option></select><input id="pfRenderer" aria-label="Custom WebGL renderer" spellcheck="false" /></div>
+            <p id="gpuWarning" class="help warn">Custom metadata changes the reported GPU names. Graphics capabilities and rendering still come from this machine.</p>
+          </div>
+          <div class="setting-row"><label for="pfWebgpuMode">WebGPU</label><div><select id="pfWebgpuMode"><option value="real">Real adapter</option><option value="webgl">Based on WebGL metadata</option><option value="custom">Custom metadata</option><option value="disabled">Disabled (no adapter)</option></select><p class="help">Based on WebGL sets vendor/device metadata; it does not emulate another GPU's features, limits or performance.</p></div></div>
+          <div id="webgpuCustom" class="custom-panel"><div class="row"><div class="field grow"><label for="pfWgpuVendor">Vendor identifier</label><input id="pfWgpuVendor" placeholder="nvidia, amd, intel..." /></div><div class="field grow"><label for="pfWgpuArch">Architecture</label><input id="pfWgpuArch" placeholder="e.g. ampere" /></div></div><div class="row"><div class="field grow"><label for="pfWgpuDevice">Device identifier</label><input id="pfWgpuDevice" placeholder="Optional" /></div><div class="field grow"><label for="pfWgpuDescription">Description</label><input id="pfWgpuDescription" placeholder="Optional" /></div></div></div>
+          <div class="setting-row"><label for="pfCpuMode">CPU threads</label><div class="row"><select id="pfCpuMode"><option value="real">Real</option><option value="custom">Custom</option></select><input id="pfCores" type="number" min="1" max="128" step="1" aria-label="Custom CPU threads" /></div></div>
+          <div class="setting-row"><label for="pfMemoryMode">RAM</label><div class="row"><select id="pfMemoryMode"><option value="real">Real</option><option value="custom">Custom</option></select><select id="pfMemory" aria-label="Custom RAM"><option value="2">2 GB</option><option value="4">4 GB</option><option value="8">8 GB</option><option value="16">16 GB</option><option value="32">32 GB</option></select></div></div>
+          <p id="realHardware" class="help"></p>
+        </details>
+        <details open>
+          <summary>Screen and privacy output</summary>
+          <div class="setting-row"><label for="pfScreenMode">Screen resolution</label><div><select id="pfScreenMode"><option value="real">Real display</option><option value="custom">Custom / predefined</option></select></div></div>
+          <div id="screenCustom" class="custom-panel"><div class="row"><select id="pfScreenPreset" aria-label="Predefined screen resolution"><option value="">Custom</option><option value="1280x720">1280 x 720</option><option value="1366x768">1366 x 768</option><option value="1440x900">1440 x 900</option><option value="1536x864">1536 x 864</option><option value="1920x1080">1920 x 1080</option><option value="2560x1440">2560 x 1440</option><option value="3840x2160">3840 x 2160</option></select><button id="randomScreen" type="button" class="btn ghost">Pick random</button></div><div class="screen-grid"><div class="field"><label for="pfWidth">Width</label><input id="pfWidth" type="number" min="320" max="16384" /></div><div class="field"><label for="pfHeight">Height</label><input id="pfHeight" type="number" min="320" max="16384" /></div><div class="field"><label for="pfAvailWidth">Available width</label><input id="pfAvailWidth" type="number" min="320" max="16384" /></div><div class="field"><label for="pfAvailHeight">Available height</label><input id="pfAvailHeight" type="number" min="320" max="16384" /></div></div></div>
+          <div class="setting-row"><label for="pfFontsMode">Fonts</label><div><select id="pfFontsMode"><option value="subset">Protected per-profile subset</option><option value="real">Real installed fonts</option><option value="custom">Custom additional-font allowlist</option></select><textarea id="pfFonts" rows="3" aria-label="Allowed additional fonts" placeholder="Arial Narrow, Garamond, Rockwell"></textarea><p class="help">Custom mode keeps Windows default fonts and the installed additional fonts you list. It cannot install or create fonts.</p></div></div>
+          <div class="setting-row"><span>Hardware noise</span><div class="noise-grid"><label><input id="pfCanvasNoise" type="checkbox" /> Canvas</label><label><input id="pfGlNoise" type="checkbox" /> WebGL image</label><label><input id="pfAudioNoise" type="checkbox" /> AudioContext</label><label><input id="pfRectsNoise" type="checkbox" /> ClientRects</label><label><input id="pfSpeechNoise" type="checkbox" /> Speech voice subset</label></div></div>
+          <p class="help">Each switch uses the profile's existing stable seed. Canvas noise can still be detected by known-pixel tests. ClientRects changes reported coordinates slightly; speech protection filters the real voice list.</p>
+        </details>
+        <details open>
+          <summary>Network, location and language</summary>
+          <div class="setting-row"><label for="pfWebrtc">WebRTC</label><div><select id="pfWebrtc"><option value="auto">Protect direct UDP when proxied</option><option value="block-udp">Block direct UDP</option><option value="real">Real / unrestricted</option><option value="disabled">Disabled (block connections)</option></select><p class="help">Real mode permits direct WebRTC traffic, which may expose the machine's IP. The HTTP proxy relay does not support Proxy UDP or replacing WebRTC IPs.</p></div></div>
+          <div class="setting-row"><label for="pfTimezoneMode">Timezone</label><div><select id="pfTimezoneMode"><option value="proxy">Based on IP</option><option value="real">Real</option><option value="custom">Custom</option></select><input id="pfTimezone" aria-label="Custom timezone" placeholder="Europe/Rome" /></div></div>
+          <div class="setting-row"><label for="pfLocationMode">Location</label><div><select id="pfLocationMode"><option value="proxy">Based on IP</option><option value="real">Real</option><option value="custom">Custom</option><option value="block">Block</option></select><select id="pfLocationPermission" aria-label="Location permission"><option value="ask">Ask each time / site permission</option><option value="allow">Always allow</option></select></div></div>
+          <div id="locationCustom" class="custom-panel screen-grid"><div class="field"><label for="pfLatitude">Latitude</label><input id="pfLatitude" type="number" min="-90" max="90" step="any" /></div><div class="field"><label for="pfLongitude">Longitude</label><input id="pfLongitude" type="number" min="-180" max="180" step="any" /></div><div class="field"><label for="pfAccuracy">Accuracy (metres)</label><input id="pfAccuracy" type="number" min="1" max="100000" step="any" /></div></div>
+          <div class="setting-row"><label for="pfDisplayLanguageMode">Display language</label><div><select id="pfDisplayLanguageMode"><option value="language">Based on browser language</option><option value="real">Real system language</option><option value="custom">Custom</option></select><input id="pfDisplayLanguage" aria-label="Custom display language" placeholder="en-US" /></div></div>
+          <p class="help">Based on IP uses the configured proxy's exit location. Without a proxy, it uses the system settings. Custom values override this explicitly. Real location still requires Windows location permission.</p>
+        </details>
+        <details>
+          <summary>Browser behavior and availability</summary>
+          <div class="setting-row"><label for="pfDnt">Do Not Track</label><select id="pfDnt"><option value="default">Default</option><option value="on">On</option><option value="off">Off</option></select></div>
+          <div class="setting-row"><label for="pfAcceleration">Hardware acceleration</label><div><select id="pfAcceleration"><option value="default">Default</option><option value="on">On</option><option value="off">Off</option></select><p class="help">Turning acceleration off can change available graphics APIs and the real renderer.</p></div></div>
+          <p class="help">Graphics APIs and capabilities come from Chromium and the rendering backend. Custom media-device counts, Proxy UDP, port-scan filtering and per-profile TLS-feature changes are not implemented in this build.</p>
+        </details>
+      </fieldset>
       <div class="dialog-actions">
-        <button class="btn ghost" value="cancel" formnovalidate>Cancel</button>
+        <button class="btn ghost" type="button" id="dialogCancel">Cancel</button>
         <button class="btn primary" value="save" id="dialogSubmit">Create</button>
       </div>
     </form>
   </dialog>
 
+  <script src="gpu-presets.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

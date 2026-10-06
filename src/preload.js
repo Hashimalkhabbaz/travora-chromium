@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('api', {
   browseExecutable: () => ipcRenderer.invoke('settings:browse'),
 
   createProfile: (data) => ipcRenderer.invoke('profiles:create', data),
+  editData: (id) => ipcRenderer.invoke('profiles:editData', id),
   updateProfile: (data) => ipcRenderer.invoke('profiles:update', data),
   regenerateProfile: (id) => ipcRenderer.invoke('profiles:regenerate', id),
   checkProxy: (id) => ipcRenderer.invoke('profiles:checkProxy', id),

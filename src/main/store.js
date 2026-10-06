@@ -78,7 +78,7 @@ class Store {
     }
   }
 
-  createProfile({ name, os, locale, proxy, color, noiseSeed, fingerprint }) {
+  createProfile({ name, os, locale, proxy, color, noiseSeed, fingerprint, fingerprintSettings }) {
     const now = new Date().toISOString();
     const profile = {
       id: crypto.randomUUID(),
@@ -89,6 +89,7 @@ class Store {
       color,
       noiseSeed,
       fingerprint,
+      ...(fingerprintSettings ? { fingerprintSettings } : {}),
       createdAt: now,
       updatedAt: now,
     };

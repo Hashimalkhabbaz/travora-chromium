@@ -213,6 +213,32 @@ index 5d96c60405..1246bb59ce 100644
    return metadata;
  }
  
+diff --git a/components/permissions/contexts/geolocation_permission_context_system.cc b/components/permissions/contexts/geolocation_permission_context_system.cc
+index 870024d865..80a3de1794 100644
+--- a/components/permissions/contexts/geolocation_permission_context_system.cc
++++ b/components/permissions/contexts/geolocation_permission_context_system.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "components/permissions/contexts/geolocation_permission_context_system.h"
++#include "third_party/blink/public/common/fingerprint/fingerprint_config.h"
+ 
+ #include "components/content_settings/core/browser/content_settings_observer.h"
+ #include "components/content_settings/core/browser/content_settings_registry.h"
+@@ -42,6 +43,13 @@ GeolocationPermissionContextSystem::GetPermissionStatusInternal(
+   auto site_permission =
+       GeolocationPermissionContext::GetPermissionStatusInternal(
+           render_frame_host, requesting_origin, embedding_origin);
++  // A configured position is synthetic and never queries the OS provider.
++  // Site permission (including Block/Ask) still applies, but it does not need
++  // permission to read the user's actual system location.
++  if (const blink::FingerprintConfig* config = blink::FingerprintConfig::Get();
++      config && config->has_geolocation) {
++    return site_permission;
++  }
+   // If the client is in the kApproximateGeolocationPermission experiment, their
+   // setting is a PermissionSetting, otherwise it's a content setting.
+   bool is_permission_content_setting = !base::FeatureList::IsEnabled(
 diff --git a/third_party/blink/common/BUILD.gn b/third_party/blink/common/BUILD.gn
 index 37ca8d47e3..b2054e283c 100644
 --- a/third_party/blink/common/BUILD.gn
@@ -250,10 +276,10 @@ index 7fd53ebba0..2e3adb2695 100644
  
 diff --git a/third_party/blink/common/fingerprint/fingerprint_config.cc b/third_party/blink/common/fingerprint/fingerprint_config.cc
 new file mode 100644
-index 0000000000..eb0c4ebafb
+index 0000000000..3e478f3cc2
 --- /dev/null
 +++ b/third_party/blink/common/fingerprint/fingerprint_config.cc
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,132 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -352,6 +378,28 @@ index 0000000000..eb0c4ebafb
 +    ReadString(*webgl, "vendor", config->webgl_vendor);
 +    ReadString(*webgl, "renderer", config->webgl_renderer);
 +  }
++  if (const base::DictValue* noise = root->FindDict("noise")) {
++    config->noise_canvas = noise->FindBool("canvas").value_or(true);
++    config->noise_webgl = noise->FindBool("webgl").value_or(true);
++    config->noise_audio = noise->FindBool("audio").value_or(true);
++    config->noise_fonts = noise->FindBool("fonts").value_or(true);
++    config->noise_client_rects = noise->FindBool("clientRects").value_or(false);
++    config->noise_speech_voices = noise->FindBool("speechVoices").value_or(false);
++  }
++  if (const base::ListValue* fonts = root->FindList("fontAllowlist")) {
++    for (const auto& font : *fonts) {
++      if (font.is_string()) config->font_allowlist.push_back(font.GetString());
++    }
++  }
++  config->webrtc_disabled = root->FindBool("webrtcDisabled").value_or(false);
++  if (const base::DictValue* webgpu = root->FindDict("webgpu")) {
++    config->webgpu_disabled = webgpu->FindBool("disabled").value_or(false);
++    config->has_webgpu_metadata = webgpu->FindBool("custom").value_or(false);
++    ReadString(*webgpu, "vendor", config->webgpu_vendor);
++    ReadString(*webgpu, "architecture", config->webgpu_architecture);
++    ReadString(*webgpu, "device", config->webgpu_device);
++    ReadString(*webgpu, "description", config->webgpu_description);
++  }
 +  return config;
 +}
 +
@@ -378,10 +426,10 @@ index d2881c7a29..3bb6e7269c 100644
      "features.h",
 diff --git a/third_party/blink/public/common/fingerprint/fingerprint_config.h b/third_party/blink/public/common/fingerprint/fingerprint_config.h
 new file mode 100644
-index 0000000000..b92f28cde4
+index 0000000000..a35e38a800
 --- /dev/null
 +++ b/third_party/blink/public/common/fingerprint/fingerprint_config.h
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,95 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -391,6 +439,7 @@ index 0000000000..b92f28cde4
 +
 +#include <cstdint>
 +#include <string>
++#include <vector>
 +
 +#include "third_party/blink/public/common/common_export.h"
 +
@@ -455,6 +504,22 @@ index 0000000000..b92f28cde4
 +
 +  // 0 = noise disabled.
 +  uint64_t noise_seed = 0;
++  // Optional independent controls. Existing seed-only profiles retain their
++  // original canvas/WebGL/audio/font behavior; new surfaces are opt-in.
++  bool noise_canvas = true;
++  bool noise_webgl = true;
++  bool noise_audio = true;
++  bool noise_fonts = true;
++  bool noise_client_rects = false;
++  bool noise_speech_voices = false;
++  std::vector<std::string> font_allowlist;
++  bool webrtc_disabled = false;
++  bool webgpu_disabled = false;
++  bool has_webgpu_metadata = false;
++  std::string webgpu_vendor;
++  std::string webgpu_architecture;
++  std::string webgpu_device;
++  std::string webgpu_description;
 +};
 +
 +}  // namespace blink
@@ -475,10 +540,10 @@ index 799b6b7135..d5f692ac40 100644
    "noise_helper.cc",
 diff --git a/third_party/blink/renderer/core/canvas_interventions/fingerprint_noise.cc b/third_party/blink/renderer/core/canvas_interventions/fingerprint_noise.cc
 new file mode 100644
-index 0000000000..657cdaf0bd
+index 0000000000..845a14630b
 --- /dev/null
 +++ b/third_party/blink/renderer/core/canvas_interventions/fingerprint_noise.cc
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,145 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -537,7 +602,10 @@ index 0000000000..657cdaf0bd
 +
 +scoped_refptr<StaticBitmapImage> MaybeNoiseCanvasSnapshot(
 +    ExecutionContext* context,
-+    scoped_refptr<StaticBitmapImage> image) {
++    scoped_refptr<StaticBitmapImage> image,
++    bool webgl) {
++  const FingerprintConfig* config = FingerprintConfig::Get();
++  if (!config || !(webgl ? config->noise_webgl : config->noise_canvas)) return image;
 +  const uint64_t token = NoiseTokenFor(context);
 +  if (!token || !image) {
 +    return image;
@@ -584,6 +652,8 @@ index 0000000000..657cdaf0bd
 +                          base::span<uint8_t> pixels,
 +                          int width,
 +                          int height) {
++  const FingerprintConfig* config = FingerprintConfig::Get();
++  if (!config || !config->noise_webgl) return;
 +  const uint64_t token = NoiseTokenFor(context);
 +  if (!token || width <= 0 || height <= 0 ||
 +      static_cast<int64_t>(width) * height > kMaxNoisedPixels ||
@@ -596,6 +666,8 @@ index 0000000000..657cdaf0bd
 +void MaybeNoiseAudioSamples(ExecutionContext* context,
 +                            base::span<float> samples,
 +                            unsigned channel) {
++  const FingerprintConfig* config = FingerprintConfig::Get();
++  if (!config || !config->noise_audio) return;
 +  uint64_t state = NoiseTokenFor(context);
 +  if (!state) {
 +    return;
@@ -619,10 +691,10 @@ index 0000000000..657cdaf0bd
 +}  // namespace blink
 diff --git a/third_party/blink/renderer/core/canvas_interventions/fingerprint_noise.h b/third_party/blink/renderer/core/canvas_interventions/fingerprint_noise.h
 new file mode 100644
-index 0000000000..f93ac6d3a5
+index 0000000000..c50aaff125
 --- /dev/null
 +++ b/third_party/blink/renderer/core/canvas_interventions/fingerprint_noise.h
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,45 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -651,7 +723,8 @@ index 0000000000..f93ac6d3a5
 +// Returns a noised raster copy of `image`, or `image` itself.
 +CORE_EXPORT scoped_refptr<StaticBitmapImage> MaybeNoiseCanvasSnapshot(
 +    ExecutionContext* context,
-+    scoped_refptr<StaticBitmapImage> image);
++    scoped_refptr<StaticBitmapImage> image,
++    bool webgl = false);
 +
 +// Noises 4-byte-per-pixel data in place (e.g. WebGL readPixels RGBA output).
 +CORE_EXPORT void MaybeNoiseRgbaPixels(ExecutionContext* context,
@@ -875,8 +948,35 @@ index 73e27320ca..c041a0fcab 100644
    // If a location result arrives from the browser process while the page is
    // hidden (e.g. due to an in-flight Mojo response racing with a tab switch),
    // we drop the update immediately. This guarantees that no location data is
+diff --git a/third_party/blink/renderer/core/geometry/dom_rect.cc b/third_party/blink/renderer/core/geometry/dom_rect.cc
+index e3664f0d91..84cd53a137 100644
+--- a/third_party/blink/renderer/core/geometry/dom_rect.cc
++++ b/third_party/blink/renderer/core/geometry/dom_rect.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/core/geometry/dom_rect.h"
++#include "third_party/blink/public/common/fingerprint/fingerprint_config.h"
+ 
+ #include "third_party/blink/renderer/bindings/core/v8/v8_dom_rect_init.h"
+ #include "third_party/blink/renderer/platform/wtf/math_extras.h"
+@@ -22,7 +23,13 @@ DOMRect* DOMRect::FromRect(const gfx::Rect& rect) {
+ }
+ 
+ DOMRect* DOMRect::FromRectF(const gfx::RectF& rect) {
+-  return MakeGarbageCollected<DOMRect>(rect.x(), rect.y(), rect.width(),
++  double offset = 0;
++  if (const FingerprintConfig* config = FingerprintConfig::Get();
++      config && config->noise_seed && config->noise_client_rects &&
++      (rect.width() != 0 || rect.height() != 0)) {
++    offset = ((config->noise_seed >> 16) % 2047 + 1) * 1e-8;
++  }
++  return MakeGarbageCollected<DOMRect>(rect.x() + offset, rect.y() + offset, rect.width(),
+                                        rect.height());
+ }
+ 
 diff --git a/third_party/blink/renderer/core/html/canvas/canvas_async_blob_creator.cc b/third_party/blink/renderer/core/html/canvas/canvas_async_blob_creator.cc
-index 943d6ed7b7..3a72836a45 100644
+index 943d6ed7b7..b28d567f18 100644
 --- a/third_party/blink/renderer/core/html/canvas/canvas_async_blob_creator.cc
 +++ b/third_party/blink/renderer/core/html/canvas/canvas_async_blob_creator.cc
 @@ -9,6 +9,7 @@
@@ -887,17 +987,16 @@ index 943d6ed7b7..3a72836a45 100644
  #include "third_party/blink/public/platform/task_type.h"
  #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
  #include "third_party/blink/renderer/core/dom/document.h"
-@@ -176,7 +177,7 @@ CanvasAsyncBlobCreator::CanvasAsyncBlobCreator(
+@@ -176,6 +177,7 @@ CanvasAsyncBlobCreator::CanvasAsyncBlobCreator(
    // We use pixmap to access the image pixels. Make the image unaccelerated if
    // necessary. May return nullptr if GPU context lost or readback buffer
    // allocation failed.
--  image_ = image->MakeUnaccelerated();
-+  image_ = MaybeNoiseCanvasSnapshot(context, image)->MakeUnaccelerated();
++  // Callers apply the appropriate 2D/WebGL noise before starting encoding.
+   image_ = image->MakeUnaccelerated();
  
    if (image_) {
-     skia_image_ = image_->PaintImageForCurrentFrame().GetSwSkImage();
 diff --git a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
-index 6a5f09ae85..87f62d3319 100644
+index 6a5f09ae85..d8a8ff88d3 100644
 --- a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
 +++ b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
 @@ -48,6 +48,7 @@
@@ -914,10 +1013,42 @@ index 6a5f09ae85..87f62d3319 100644
  
 -  scoped_refptr<StaticBitmapImage> image_bitmap = Snapshot(source_buffer);
 +  scoped_refptr<StaticBitmapImage> image_bitmap =
-+      MaybeNoiseCanvasSnapshot(GetExecutionContext(), Snapshot(source_buffer));
++      MaybeNoiseCanvasSnapshot(GetExecutionContext(), Snapshot(source_buffer), IsWebGL());
    if (image_bitmap) {
      std::unique_ptr<ImageDataBuffer> data_buffer =
          ImageDataBuffer::Create(image_bitmap);
+@@ -1519,7 +1521,8 @@ void HTMLCanvasElement::toBlob(V8BlobCallback* callback,
+       ImageEncoderUtils::ToEncodingMimeType(mime_type);
+ 
+   CanvasAsyncBlobCreator* async_creator = nullptr;
+-  scoped_refptr<StaticBitmapImage> image_bitmap = Snapshot(kBackBuffer);
++  scoped_refptr<StaticBitmapImage> image_bitmap =
++      MaybeNoiseCanvasSnapshot(GetExecutionContext(), Snapshot(kBackBuffer), IsWebGL());
+   if (image_bitmap) {
+     auto* options = ImageEncodeOptions::Create();
+     options->setType(ImageEncoderUtils::MimeTypeName(encoding_mime_type));
+diff --git a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc b/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
+index f81d66014f..3d580962b0 100644
+--- a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
++++ b/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.h"
++#include "third_party/blink/renderer/core/canvas_interventions/fingerprint_noise.h"
+ 
+ #include <memory>
+ #include <utility>
+@@ -553,7 +554,8 @@ ScriptPromise<Blob> OffscreenCanvas::convertToBlob(
+   }
+ 
+   base::TimeTicks start_time = base::TimeTicks::Now();
+-  scoped_refptr<StaticBitmapImage> image_bitmap = context_->GetImage();
++  scoped_refptr<StaticBitmapImage> image_bitmap =
++      MaybeNoiseCanvasSnapshot(GetExecutionContext(), context_->GetImage(), IsWebGL());
+   if (image_bitmap) {
+     auto* resolver = MakeGarbageCollected<ScriptPromiseResolver<Blob>>(
+         script_state, exception_state.GetContext());
 diff --git a/third_party/blink/renderer/core/timezone/timezone_controller.cc b/third_party/blink/renderer/core/timezone/timezone_controller.cc
 index 270c78bfd0..2b8b74841b 100644
 --- a/third_party/blink/renderer/core/timezone/timezone_controller.cc
@@ -1002,6 +1133,57 @@ index 3d7a843995..a8f6ae8dd9 100644
  
    // Determine if the array should be zero initialized, or if it will be
    // completely overwritten.
+diff --git a/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc b/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc
+index b4c2f6839a..d62250cd39 100644
+--- a/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc
++++ b/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc
+@@ -29,6 +29,7 @@
+  */
+ 
+ #include "third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.h"
++#include "third_party/blink/public/common/fingerprint/fingerprint_config.h"
+ 
+ #include <algorithm>
+ #include <memory>
+@@ -639,6 +640,12 @@ RTCPeerConnection* RTCPeerConnection::Create(
+     ExecutionContext* context,
+     const RTCConfiguration* rtc_configuration,
+     ExceptionState& exception_state) {
++  if (const FingerprintConfig* config = FingerprintConfig::Get();
++      config && config->webrtc_disabled) {
++    exception_state.ThrowDOMException(DOMExceptionCode::kNotAllowedError,
++                                     "WebRTC is disabled for this profile.");
++    return nullptr;
++  }
+   if (context->IsContextDestroyed()) {
+     exception_state.ThrowDOMException(
+         DOMExceptionCode::kNotSupportedError,
+diff --git a/third_party/blink/renderer/modules/speech/speech_synthesis.cc b/third_party/blink/renderer/modules/speech/speech_synthesis.cc
+index 891a81543b..a1cdb4d692 100644
+--- a/third_party/blink/renderer/modules/speech/speech_synthesis.cc
++++ b/third_party/blink/renderer/modules/speech/speech_synthesis.cc
+@@ -24,6 +24,7 @@
+  */
+ 
+ #include "third_party/blink/renderer/modules/speech/speech_synthesis.h"
++#include "third_party/blink/public/common/fingerprint/fingerprint_config.h"
+ 
+ #include <tuple>
+ 
+@@ -85,7 +86,13 @@ SpeechSynthesis::SpeechSynthesis(LocalDOMWindow& window)
+ void SpeechSynthesis::OnSetVoiceList(
+     Vector<mojom::blink::SpeechSynthesisVoicePtr> mojom_voices) {
+   voice_list_.clear();
++  const FingerprintConfig* config = FingerprintConfig::Get();
++  unsigned index = 0;
+   for (auto& mojom_voice : mojom_voices) {
++    // Retain the first voice; expose a stable per-profile subset of the rest.
++    if (index++ > 0 && config && config->noise_seed &&
++        config->noise_speech_voices &&
++        ((config->noise_seed >> (index % 64)) & 1)) continue;
+     voice_list_.push_back(
+         MakeGarbageCollected<SpeechSynthesisVoice>(std::move(mojom_voice)));
+   }
 diff --git a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc b/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
 index 4604be68ad..0c20053bba 100644
 --- a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
@@ -1026,7 +1208,7 @@ index 4604be68ad..0c20053bba 100644
      // Call the offline rendering completion event listener and resolve the
      // promise too.
 diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
-index 26c0a088cc..713a431464 100644
+index 26c0a088cc..27e1c75235 100644
 --- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
 +++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
 @@ -64,6 +64,8 @@
@@ -1038,30 +1220,38 @@ index 26c0a088cc..713a431464 100644
  #include "third_party/blink/public/common/thread_safe_browser_interface_broker_proxy.h"
  #include "third_party/blink/public/mojom/gpu/gpu.mojom-blink.h"
  #include "third_party/blink/public/platform/platform.h"
-@@ -4200,6 +4202,11 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+@@ -4200,8 +4202,13 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
        return ScriptValue::CreateNull(script_state->GetIsolate());
      case WebGLDebugRendererInfo::kUnmaskedRendererWebgl:
        if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
+-        return WebGLAny(script_state,
+-                        String(ContextGL()->GetString(GL_RENDERER)));
++        const String native_renderer(ContextGL()->GetString(GL_RENDERER));
 +        if (const FingerprintConfig* fingerprint = FingerprintConfig::Get();
 +            fingerprint && !fingerprint->webgl_renderer.empty()) {
 +          return WebGLAny(script_state,
 +                          String::FromUtf8(fingerprint->webgl_renderer));
 +        }
-         return WebGLAny(script_state,
-                         String(ContextGL()->GetString(GL_RENDERER)));
++        return WebGLAny(script_state, native_renderer);
        }
-@@ -4209,6 +4216,11 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+       SynthesizeGLError(
+           GL_INVALID_ENUM, "getParameter",
+@@ -4209,8 +4216,13 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
        return ScriptValue::CreateNull(script_state->GetIsolate());
      case WebGLDebugRendererInfo::kUnmaskedVendorWebgl:
        if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
+-        return WebGLAny(script_state,
+-                        String(ContextGL()->GetString(GL_VENDOR)));
++        const String native_vendor(ContextGL()->GetString(GL_VENDOR));
 +        if (const FingerprintConfig* fingerprint = FingerprintConfig::Get();
 +            fingerprint && !fingerprint->webgl_vendor.empty()) {
 +          return WebGLAny(script_state,
 +                          String::FromUtf8(fingerprint->webgl_vendor));
 +        }
-         return WebGLAny(script_state,
-                         String(ContextGL()->GetString(GL_VENDOR)));
++        return WebGLAny(script_state, native_vendor);
        }
+       SynthesizeGLError(
+           GL_INVALID_ENUM, "getParameter",
 @@ -5356,6 +5368,17 @@ void WebGLRenderingContextBase::ReadPixelsHelper(GLint x,
      }
      ContextGL()->ReadPixels(x, y, width, height, format, type, data);
@@ -1080,8 +1270,61 @@ index 26c0a088cc..713a431464 100644
  }
  
  void WebGLRenderingContextBase::RenderbufferStorageImpl(
+diff --git a/third_party/blink/renderer/modules/webgpu/gpu.cc b/third_party/blink/renderer/modules/webgpu/gpu.cc
+index 74daeb175a..ffa9145717 100644
+--- a/third_party/blink/renderer/modules/webgpu/gpu.cc
++++ b/third_party/blink/renderer/modules/webgpu/gpu.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/modules/webgpu/gpu.h"
++#include "third_party/blink/public/common/fingerprint/fingerprint_config.h"
+ 
+ #include <utility>
+ 
+@@ -392,6 +393,11 @@ ScriptPromise<IDLNullable<GPUAdapter>> GPU::requestAdapter(
+       MakeGarbageCollected<ScriptPromiseResolver<IDLNullable<GPUAdapter>>>(
+           script_state);
+   auto promise = resolver->Promise();
++  if (const FingerprintConfig* config = FingerprintConfig::Get();
++      config && config->webgpu_disabled) {
++    resolver->Resolve(nullptr);
++    return promise;
++  }
+   RequestAdapterImpl(script_state, options, resolver);
+   return promise;
+ }
+diff --git a/third_party/blink/renderer/modules/webgpu/gpu_adapter_info.cc b/third_party/blink/renderer/modules/webgpu/gpu_adapter_info.cc
+index 9d155705c1..d04e15d80d 100644
+--- a/third_party/blink/renderer/modules/webgpu/gpu_adapter_info.cc
++++ b/third_party/blink/renderer/modules/webgpu/gpu_adapter_info.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/modules/webgpu/gpu_adapter_info.h"
++#include "third_party/blink/public/common/fingerprint/fingerprint_config.h"
+ 
+ #include "third_party/blink/renderer/modules/webgpu/gpu_memory_heap_info.h"
+ #include "third_party/blink/renderer/modules/webgpu/gpu_subgroup_matrix_config.h"
+@@ -34,7 +35,15 @@ GPUAdapterInfo::GPUAdapterInfo(const String& vendor,
+       type_(type),
+       d3d_shader_model_(d3d_shader_model),
+       vk_driver_version_(vk_driver_version),
+-      power_preference_(power_preference) {}
++      power_preference_(power_preference) {
++  if (const FingerprintConfig* config = FingerprintConfig::Get();
++      config && config->has_webgpu_metadata) {
++    vendor_ = String::FromUtf8(config->webgpu_vendor);
++    architecture_ = String::FromUtf8(config->webgpu_architecture);
++    device_ = String::FromUtf8(config->webgpu_device);
++    description_ = String::FromUtf8(config->webgpu_description);
++  }
++}
+ 
+ void GPUAdapterInfo::AppendMemoryHeapInfo(GPUMemoryHeapInfo* info) {
+   memory_heaps_.push_back(info);
 diff --git a/third_party/blink/renderer/platform/fonts/font_cache.cc b/third_party/blink/renderer/platform/fonts/font_cache.cc
-index 372b10936b..29653191a3 100644
+index 372b10936b..715a9b1eb9 100644
 --- a/third_party/blink/renderer/platform/fonts/font_cache.cc
 +++ b/third_party/blink/renderer/platform/fonts/font_cache.cc
 @@ -47,6 +47,8 @@
@@ -1093,7 +1336,7 @@ index 372b10936b..29653191a3 100644
  #include "third_party/blink/public/platform/platform.h"
  #include "third_party/blink/public/platform/web_font_prewarmer.h"
  #include "third_party/blink/renderer/platform/font_family_names.h"
-@@ -152,12 +154,72 @@ const FontPlatformData* FontCache::SystemFontPlatformData(
+@@ -152,12 +154,79 @@ const FontPlatformData* FontCache::SystemFontPlatformData(
  }
  #endif
  
@@ -1131,7 +1374,7 @@ index 372b10936b..29653191a3 100644
 +// the set of installed fonts no longer identifies the machine across profiles.
 +bool IsFontHiddenByFingerprint(const AtomicString& family) {
 +  const FingerprintConfig* fingerprint = FingerprintConfig::Get();
-+  if (!fingerprint || !fingerprint->noise_seed || family.empty()) {
++  if (!fingerprint || family.empty()) {
 +    return false;
 +  }
 +  const std::string name = base::ToLowerASCII(family.Utf8());
@@ -1142,6 +1385,13 @@ index 372b10936b..29653191a3 100644
 +      return false;
 +    }
 +  }
++  if (!fingerprint->font_allowlist.empty()) {
++    for (const std::string& allowed : fingerprint->font_allowlist) {
++      if (name == allowed) return false;
++    }
++    return true;
++  }
++  if (!fingerprint->noise_seed || !fingerprint->noise_fonts) return false;
 +  uint64_t hash = 0xcbf29ce484222325ull ^ fingerprint->noise_seed;
 +  for (char c : name) {
 +    hash ^= static_cast<uint8_t>(c);

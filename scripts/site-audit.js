@@ -3,7 +3,7 @@
 // (stock Google Chrome, clean temporary profile), saving each page's text and a
 // screenshot for comparison.
 //
-//   node scripts/site-audit.js <outDir> [profileName ...] [--resume]
+//   node scripts/site-audit.js <outDir> [profileName ...] [--resume] [--sites=creepjs,browserscan,...]
 //
 // Pages are read through a bare CDP connection that never calls Runtime.enable
 // or attaches during page load: the usual automation tools enable domains that
@@ -14,7 +14,9 @@ const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 const { Store } = require('../src/main/store');
-const { Launcher } = require('../src/main/launcher');
+const { Launcher, detectBrowserVersion } = require('../src/main/launcher');
+const { getHostHardware } = require('../src/main/host-hardware');
+const { alignStoredProfile } = require('../src/main/profile-compatibility');
 const { lookupProxyGeo } = require('../src/main/proxy-geo');
 const { buildLaunchConfig } = require('../src/main/launch-config');
 const { applyProfileSettings } = require('../src/main/chrome-profile');
@@ -22,6 +24,7 @@ const { applyProfileSettings } = require('../src/main/chrome-profile');
 const STOCK_CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const PORT = 9555;
 const RESUME = process.argv.includes('--resume');
+const selectedSites = process.argv.find(arg => arg.startsWith('--sites='))?.slice('--sites='.length).split(',');
 
 // [label, url, seconds to let the site finish its checks]
 const PAGES = [
@@ -109,10 +112,20 @@ async function visit(outDir, label, url, seconds) {
   try {
     await sleep(seconds * 1000);
     await withPage(target.webSocketDebuggerUrl, async (send) => {
-      const text = await send('Runtime.evaluate', {
-        expression: 'document.body ? document.body.innerText : ""',
-        returnByValue: true,
+      const readText = () => send('Runtime.evaluate', {
+        expression: 'document.body ? document.body.innerText : ""', returnByValue: true,
       });
+      let text = await readText();
+      // The layout's default score is not a measurement. Give slow API calls
+      // a bounded extra wait, then clearly report incomplete results.
+      if (label === 'browserscan') {
+        const populated = () => /^\d+\.\d+\.\d+\.\d+$/m.test(text.result?.result?.value || '') && /Chrome \d/.test(text.result?.result?.value || '');
+        for (let retry = 0; !populated() && retry < 3; retry++) {
+          await sleep(10000);
+          text = await readText();
+        }
+        if (!populated()) console.log('incomplete BrowserScan measurements (default score ignored)');
+      }
       fs.writeFileSync(path.join(outDir, `${label}.txt`), text.result?.result?.value || `(no text: ${JSON.stringify(text.result || text.error)})`);
       // Window-based fallback captures need this page to be visible.
       await send('Page.bringToFront');
@@ -138,6 +151,7 @@ async function visit(outDir, label, url, seconds) {
 async function runPages(outDir) {
   fs.mkdirSync(outDir, { recursive: true });
   for (const [label, url, seconds] of PAGES) {
+    if (selectedSites && !selectedSites.includes(label)) continue;
     if (RESUME && fs.existsSync(path.join(outDir, `${label}.txt`)) && fs.existsSync(path.join(outDir, `${label}.png`))) {
       console.log(`  ${label}... already saved`);
       continue;
@@ -171,23 +185,31 @@ async function auditRealMachine(outDir) {
 
 async function auditProfile(store, profile, outDir) {
   // Same steps as the app's launch handler (src/main/main.js).
+  const browserPath = store.getSettings().browserPath;
+  const hardware = await getHostHardware(browserPath);
+  profile = alignStoredProfile(store, profile, hardware, detectBrowserVersion(browserPath));
   if (profile.proxy) profile = store.updateProfile(profile.id, { proxyGeo: await lookupProxyGeo(profile.proxy) });
-  const { nativeConfig, language, languages } = buildLaunchConfig(profile, { systemLocale: 'en-US' });
+  const config = buildLaunchConfig(profile, { systemLocale: 'en-US' });
+  const { nativeConfig, language, languages } = config;
   applyProfileSettings(store.userDataDir(profile.id), {
     name: profile.name,
     color: profile.color || '#1a73e8',
     languages,
     proxied: Boolean(profile.proxy),
+    webrtcPolicy: config.webrtcPolicy,
+    locationPermission: config.locationPermission,
+    doNotTrack: config.doNotTrack,
+    acceleration: config.acceleration,
   });
   const fake = profile.fingerprint.fingerprint.screen;
   const launcher = new Launcher();
   await launcher.launch(profile, {
-    browserPath: store.getSettings().browserPath,
+    browserPath,
     userDataDir: store.userDataDir(profile.id),
     nativeConfig,
     language,
-    windowSize: { width: Math.min(fake.availWidth, 1536), height: Math.min(fake.availHeight, 824) },
-    extraArgs: [`--remote-debugging-port=${PORT}`],
+    windowSize: { width: Math.min(fake.availWidth, hardware.screen.availWidth), height: Math.min(fake.availHeight, hardware.screen.availHeight) },
+    extraArgs: [...config.extraArgs, `--remote-debugging-port=${PORT}`],
   });
   try {
     await waitForDebugger();
@@ -198,11 +220,12 @@ async function auditProfile(store, profile, outDir) {
   }
 }
 
-(async () => {
+async function main() {
   const outRoot = process.argv[2];
-  const only = process.argv.slice(3).filter(arg => arg !== '--resume');
+  const only = process.argv.slice(3).filter(arg => arg !== '--resume' && !arg.startsWith('--sites='));
   if (!outRoot) throw new Error('Usage: node scripts/site-audit.js <outDir> [profileName ...] [--resume]');
-  const store = new Store(path.join(process.env.APPDATA, 'browser-manager', 'data'));
+  if (selectedSites?.some(label => !PAGES.some(page => page[0] === label))) throw new Error('Unknown --sites label. Valid labels: ' + PAGES.map(page => page[0]).join(', '));
+  const store = new Store(process.env.BM_DATA_DIR || path.join(process.env.APPDATA, 'browser-manager', 'data'));
 
   if (!only.length || only.includes('real')) {
     console.log('real machine (stock Chrome, clean profile)');
@@ -213,7 +236,11 @@ async function auditProfile(store, profile, outDir) {
     console.log(`profile "${profile.name}"`);
     await auditProfile(store, profile, path.join(outRoot, profile.name.replace(/[^\w-]+/g, '_')));
   }
-})().catch((err) => {
+}
+
+if (require.main === module) main().catch((err) => {
   console.error(err);
   process.exit(1);
 });
+
+module.exports = { auditProfile };
